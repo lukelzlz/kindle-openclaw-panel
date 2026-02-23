@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw Chat</title>
+    <style>
+        /*
+         * OpenClaw Kindle 聊天面板
+         * 
+         * 【部署说明】
+         * 1. 将此文件放到任意 HTTP 服务器上
+         * 2. 确保OpenClaw Gateway 正在运行
+         * 3. 修改下方 GATEWAY_URL 变量为你的 Gateway 地址
+         * 4. 在 Kindle 实验性浏览器中访问此页面
+         * 
+         * 【Gateway 配置】
+         * - 本地运行: ws://127.0.0.1:18789
+         * - 远程服务器: ws://你的服务器IP:18789
+         * - 如果通过 SSH 隧道: ws://127.0.0.1:18789
+         * 
+         * 【注意事项】
+         * - Kindle 浏览器不支持现代 ES6+ 特性
+         * - 使用传统 callback 风格代码
+         * - 高对比度黑白设计适配 E-ink 屏幕
+         */
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 18px;
+            line-height: 1.4;
+            background: #ffffff;
+            color: #000000;
+            padding: 10px;
+        }
+        
+        /* 连接状态栏 */
+        .status-bar {
+            background: #000000;
+            color: #ffffff;
+            padding: 8px 12px;
+            margin-bottom: 10px;
+            font-weight: bold;
+            font-size: 16px;
+        }
+        
+        .status-connected {
+            background: #000000;
+        }
+        
+        .status-disconnected {
+            background: #333333;
+        }
+        
+        .status-connecting {
+            background: #666666;
+        }
+        
+        /* 消息容器 */
+        .messages {
+            height: 60vh;
+            overflow-y: scroll;
+            border: 2px solid #000000;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #ffffff;
+        }
+        
+        /* 单条消息 */
+        .message {
+            margin-bottom: 12px;
+            padding: 8px;
+            border-left: 4px solid #000000;
+        }
+        
+        .message-user {
+            background: #f0f0f0;
+            border-left-color: #000000;
+        }
+        
+        .message-ai {
+            background: #ffffff;
+            border-left-color: #666666;
+        }
+        
+        .message-sender {
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+        }
+        
+        .message-content {
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+        
+        /* 输入区域 */
+        .input-area {
+            display: block;
+            width: 100%;
+        }
+        
+        .input-wrapper {
+            display: block;
+            margin-bottom: 10px;
+        }
+        
+        textarea {
+            width: 100%;
+            height: 80px;
+            padding: 10px;
+            font-size: 18px;
+            font-family: Georgia, "Times New Roman", serif;
+            border: 2px solid #000000;
+            background: #ffffff;
+            color: #000000;
+            resize: none;
+        }
+        
+        textarea:focus {
+            outline: 3px solid #000000;
+        }
+        
+        /* 按钮 */
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 15px;
+            font-size: 20px;
+            font-weight: bold;
+            font-family: Georgia, "Times New Roman", serif;
+            border: 2px solid #000000;
+            cursor: pointer;
+            background: #000000;
+            color: #ffffff;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+        
+        .btn:active {
+            background: #333333;
+        }
+        
+        .btn:disabled {
+            background: #999999;
+            border-color: #999999;
+            cursor: not-allowed;
+        }
+        
+        .btn-secondary {
+            background: #ffffff;
+            color: #000000;
+        }
+        
+        .btn-secondary:active {
+            background: #f0f0f0;
+        }
+        
+        /* 按钮组 */
+        .button-group {
+            display: block;
+        }
+        
+        .button-group .btn {
+            margin-bottom: 8px;
+        }
+        
+        .button-group .btn:last-child {
+            margin-bottom: 0;
+        }
+        
+        /* 连接表单 */
+        .connect-form {
+            background: #f0f0f0;
+            padding: 15px;
+            border: 2px solid #000000;
+            margin-bottom: 10px;
+        }
+        
+        .connect-form input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            font-size: 16px;
+            font-family: monospace;
+            border: 2px solid #000000;
+            margin-bottom: 10px;
+            background: #ffffff;
+        }
+        
+        .connect-form label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        /* 隐藏类 */
+        .hidden {
+            display: none;
+        }
+        
+        /* 加载指示器 */
+        .loading {
+            text-align: center;
+            padding: 10px;
+            font-style: italic;
+            color: #666666;
+        }
+    </style>
+</head>
+<body>
+    <!-- 连接状态栏 -->
+    <div id="statusBar" class="status-bar status-disconnected">
+        状态: 未连接
+    </div>
+    
+    <!-- 连接表单（未连接时显示） -->
+    <div id="connectForm" class="connect-form">
+        <label for="gatewayUrl">Gateway WebSocket 地址:</label>
+        <input type="text" id="gatewayUrl" value="ws://127.0.0.1:18789" placeholder="ws://IP:PORT">
+        <button class="btn" onclick="connect()">连接</button>
+    </div>
+    
+    <!-- 聊天区域（连接后显示） -->
+    <div id="chatArea" class="hidden">
+        <!-- 消息列表 -->
+        <div id="messages" class="messages"></div>
+        
+        <!-- 输入区域 -->
+        <div class="input-area">
+            <div class="input-wrapper">
+                <textarea id="messageInput" placeholder="输入消息..." onkeydown="handleKeyDown(event)"></textarea>
+            </div>
+            <div class="button-group">
+                <button id="sendBtn" class="btn" onclick="sendMessage()">发送</button>
+                <button class="btn btn-secondary" onclick="disconnect()">断开连接</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================
+        // 配置区域
+        // ============================================
+        var GATEWAY_URL = 'ws://127.0.0.1:18789';
+        
+        // ============================================
+        // 全局变量
+        // ============================================
+        var ws = null;
+        var isConnected = false;
+        var currentSessionId = null;
+        
+        // ============================================
+        // DOM 元素引用
+        // ============================================
+        var statusBar = document.getElementById('statusBar');
+        var connectForm = document.getElementById('connectForm');
+        var chatArea = document.getElementById('chatArea');
+        var messagesContainer = document.getElementById('messages');
+        var messageInput = document.getElementById('messageInput');
+        var sendBtn = document.getElementById('sendBtn');
+        var gatewayInput = document.getElementById('gatewayUrl');
+        
+        // ============================================
+        // 连接管理
+        // ============================================
+        
+        function connect() {
+            var url = gatewayInput.value.trim();
+            if (!url) {
+                url = GATEWAY_URL;
+            }
+            
+            updateStatus('connecting', '状态: 连接中...');
+            
+            try {
+                ws = new WebSocket(url);
+                
+                ws.onopen = function() {
+                    isConnected = true;
+                    updateStatus('connected', '状态: 已连接');
+                    showChatArea();
+                    addSystemMessage('已连接到 OpenClaw Gateway');
+                };
+                
+                ws.onmessage = function(event) {
+                    handleMessage(event.data);
+                };
+                
+                ws.onerror = function(error) {
+                    updateStatus('disconnected', '状态: 连接错误');
+                    addSystemMessage('连接错误，请检查 Gateway 地址');
+                };
+                
+                ws.onclose = function() {
+                    isConnected = false;
+                    updateStatus('disconnected', '状态: 已断开');
+                    showConnectForm();
+                    addSystemMessage('连接已断开');
+                };
+            } catch (e) {
+                updateStatus('disconnected', '状态: 连接失败');
+                alert('无法连接: ' + e.message);
+            }
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            isConnected = false;
+        }
+        
+        // ============================================
+        // 状态更新
+        // ============================================
+        
+        function updateStatus(status, text) {
+            statusBar.textContent = text;
+            statusBar.className = 'status-bar';
+            
+            if (status === 'connected') {
+                statusBar.className += ' status-connected';
+            } else if (status === 'connecting') {
+                statusBar.className += ' status-connecting';
+            } else {
+                statusBar.className += ' status-disconnected';
+            }
+        }
+        
+        function showChatArea() {
+            connectForm.className = 'hidden';
+            chatArea.className = '';
+            messageInput.focus();
+        }
+        
+        function showConnectForm() {
+            chatArea.className = 'hidden';
+            connectForm.className = 'connect-form';
+        }
+        
+        // ============================================
+        // 消息处理
+        // ============================================
+        
+        function handleMessage(data) {
+            try {
+                var msg = JSON.parse(data);
+                
+                // 处理不同类型的消息
+                if (msg.type === 'session_start') {
+                    currentSessionId = msg.session_id;
+                } else if (msg.type === 'agent_turn') {
+                    // AI 回复
+                    if (msg.message) {
+                        addMessage('ai', msg.message);
+                    }
+                } else if (msg.type === 'user_turn') {
+                    // 用户消息确认（可选显示）
+                } else if (msg.type === 'error') {
+                    addSystemMessage('错误: ' + (msg.message || '未知错误'));
+                }
+            } catch (e) {
+                // 非 JSON 消息，作为普通文本处理
+                addMessage('ai', data);
+            }
+        }
+        
+        function sendMessage() {
+            var text = messageInput.value.trim();
+            if (!text || !isConnected) {
+                return;
+            }
+            
+            // 显示用户消息
+            addMessage('user', text);
+            
+            // 发送到 Gateway
+            var payload = {
+                type: 'user_turn',
+                message: text
+            };
+            
+            if (currentSessionId) {
+                payload.session_id = currentSessionId;
+            }
+            
+            try {
+                ws.send(JSON.stringify(payload));
+            } catch (e) {
+                addSystemMessage('发送失败: ' + e.message);
+            }
+            
+            // 清空输入框
+            messageInput.value = '';
+            messageInput.focus();
+        }
+        
+        // ============================================
+        // UI 消息显示
+        // ============================================
+        
+        function addMessage(sender, content) {
+            var div = document.createElement('div');
+            div.className = 'message message-' + sender;
+            
+            var senderDiv = document.createElement('div');
+            senderDiv.className = 'message-sender';
+            senderDiv.textContent = sender === 'user' ? '你' : 'AI';
+            
+            var contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.textContent = content;
+            
+            div.appendChild(senderDiv);
+            div.appendChild(contentDiv);
+            
+            messagesContainer.appendChild(div);
+            scrollToBottom();
+        }
+        
+        function addSystemMessage(content) {
+            var div = document.createElement('div');
+            div.className = 'message';
+            div.style.borderLeftColor = '#999999';
+            div.style.background = '#f9f9f9';
+            div.style.fontStyle = 'italic';
+            div.textContent = content;
+            
+            messagesContainer.appendChild(div);
+            scrollToBottom();
+        }
+        
+        function scrollToBottom() {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+        
+        // ============================================
+        // 键盘事件
+        // ============================================
+        
+        function handleKeyDown(event) {
+            // Ctrl+Enter 或 Cmd+Enter 发送消息
+            if (event.keyCode === 13 && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+        
+        // ============================================
+        // 初始化
+        // ============================================
+        
+        // 页面加载时聚焦到连接按钮
+        gatewayInput.focus();
+    </script>
+</body>
+</html>
