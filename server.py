@@ -11,6 +11,12 @@ import urllib.error
 import sys
 import os
 
+# 启用系统代理支持
+import os
+proxy_handler = urllib.request.ProxyHandler(urllib.request.getproxies())
+opener = urllib.request.build_opener(proxy_handler)
+urllib.request.install_opener(opener)
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 GATEWAY = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:7860"
 

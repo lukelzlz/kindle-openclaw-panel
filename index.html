@@ -193,8 +193,11 @@
 <body>
     <h1>OpenClaw Chat</h1>
     
+    <!-- 配置切换按钮 -->
+    <button id="configToggle" class="btn btn-full btn-outline" onclick="toggleConfig()" style="margin-bottom:15px">⚙️ 配置 ▾</button>
+    
     <!-- 配置区域 -->
-    <div id="configArea" class="config-form">
+    <div id="configArea" class="config-form hidden">
         <label>Gateway HTTP 地址:</label>
         <input type="text" id="gatewayUrl" value="" placeholder="留空使用本地代理">
         <div class="hint">留空即可（通过代理访问 Gateway）</div>
@@ -254,6 +257,18 @@
         var sendBtn = document.getElementById('sendBtn');
         
         // ============ 初始化 ============
+        function toggleConfig() {
+            var area = document.getElementById('configArea');
+            var btn = document.getElementById('configToggle');
+            if (area.classList.contains('hidden')) {
+                area.classList.remove('hidden');
+                btn.textContent = '⚙️ 配置 ▴';
+            } else {
+                area.classList.add('hidden');
+                btn.textContent = '⚙️ 配置 ▾';
+            }
+        }
+        
         function loadConfig() {
             try {
                 var url = localStorage.getItem('oc_gateway_url');
@@ -290,6 +305,12 @@
                 localStorage.setItem('oc_gateway_token', gatewayToken);
                 localStorage.setItem('oc_agent_id', agentId);
                 localStorage.setItem('oc_sync_session_key', syncKey);
+                
+                // 保存后自动收起配置
+                var area = document.getElementById('configArea');
+                var btn = document.getElementById('configToggle');
+                area.classList.add('hidden');
+                btn.textContent = '⚙️ 配置 ▾';
                 
                 setStatus('ok', '配置已保存');
             } catch(e) {
