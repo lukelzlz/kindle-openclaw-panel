@@ -178,26 +178,29 @@
         
         /* 连接表单 */
         .connect-form {
-            background: #f0f0f0;
-            padding: 15px;
-            border: 2px solid #000000;
-            margin-bottom: 10px;
+            background: #f8f8f8;
+            padding: 20px;
+            border: 1px solid #000000;
+            margin-bottom: 15px;
         }
         
-        .connect-form input[type="text"] {
+        .connect-form input[type="text"],
+        .connect-form input[type="password"] {
             width: 100%;
-            padding: 10px;
+            padding: 12px;
             font-size: 16px;
             font-family: monospace;
-            border: 2px solid #000000;
-            margin-bottom: 10px;
+            border: 1px solid #000000;
+            margin-bottom: 15px;
             background: #ffffff;
+            -webkit-appearance: none;
         }
         
         .connect-form label {
             display: block;
             font-weight: bold;
             margin-bottom: 5px;
+            font-size: 14px;
         }
         
         /* 隐藏类 */
@@ -222,8 +225,12 @@
     
     <!-- 连接表单（未连接时显示） -->
     <div id="connectForm" class="connect-form">
-        <label for="gatewayUrl">Gateway WebSocket 地址:</label>
+        <label for="gatewayUrl">Gateway 地址:</label>
         <input type="text" id="gatewayUrl" value="ws://127.0.0.1:18789" placeholder="ws://IP:PORT">
+        
+        <label for="gatewayToken">Gateway Token (可选):</label>
+        <input type="password" id="gatewayToken" placeholder="留空则无需认证">
+        
         <button class="btn" onclick="connect()">连接</button>
     </div>
     
@@ -274,8 +281,18 @@
         
         function connect() {
             var url = gatewayInput.value.trim();
+            var token = document.getElementById('gatewayToken').value.trim();
+            
+            // 保存配置
+            saveConfig();
+            
             if (!url) {
                 url = GATEWAY_URL;
+            }
+            
+            // 如果有 token，附加到 URL
+            if (token) {
+                url = url + (url.indexOf('?') > -1 ? '&' : '?') + 'token=' + encodeURIComponent(token);
             }
             
             updateStatus('connecting', '状态: 连接中...');
@@ -459,7 +476,35 @@
         // 初始化
         // ============================================
         
-        // 页面加载时聚焦到连接按钮
+        // 从 localStorage 读取保存的配置
+        function loadConfig() {
+            try {
+                var savedUrl = localStorage.getItem('openclaw_gateway_url');
+                var savedToken = localStorage.getItem('openclaw_gateway_token');
+                
+                if (savedUrl) {
+                    gatewayInput.value = savedUrl;
+                }
+                if (savedToken) {
+                    document.getElementById('gatewayToken').value = savedToken;
+                }
+            } catch (e) {
+                // localStorage 不可用，忽略
+            }
+        }
+        
+        // 保存配置到 localStorage
+        function saveConfig() {
+            try {
+                localStorage.setItem('openclaw_gateway_url', gatewayInput.value);
+                localStorage.setItem('openclaw_gateway_token', document.getElementById('gatewayToken').value);
+            } catch (e) {
+                // localStorage 不可用，忽略
+            }
+        }
+        
+        // 页面加载时
+        loadConfig();
         gatewayInput.focus();
     </script>
 </body>
