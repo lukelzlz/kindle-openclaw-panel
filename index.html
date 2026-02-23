@@ -196,8 +196,8 @@
     <!-- 配置区域 -->
     <div id="configArea" class="config-form">
         <label>Gateway HTTP 地址:</label>
-        <input type="text" id="gatewayUrl" value="http://127.0.0.1:7860" placeholder="http://IP:PORT">
-        <div class="hint">Gateway 的 HTTP 端口（同 WS 端口）</div>
+        <input type="text" id="gatewayUrl" value="" placeholder="留空使用本地代理">
+        <div class="hint">留空即可（通过代理访问 Gateway）</div>
         
         <label>Gateway Token:</label>
         <input type="password" id="gatewayToken" placeholder="留空表示无认证">
@@ -230,13 +230,22 @@
 
     <script>
         // ============ 配置 ============
-        var gatewayUrl = 'http://127.0.0.1:7860';
+        var gatewayUrl = '';  // 空则使用当前 origin（通过代理）
         var gatewayToken = '';
         var agentId = 'main';
         
         // ============ 状态 ============
         var isSending = false;
         var messages = [];
+        
+        // ============ 工具函数 ============
+        function getGatewayUrl() {
+            if (gatewayUrl && gatewayUrl.trim()) {
+                return gatewayUrl.replace(/\/$/, '');
+            }
+            // 使用当前页面的 origin（代理模式）
+            return window.location.origin;
+        }
         
         // ============ DOM ============
         var statusEl = document.getElementById('statusBar');
@@ -272,7 +281,7 @@
         
         function saveConfig() {
             try {
-                gatewayUrl = document.getElementById('gatewayUrl').value.trim() || 'http://127.0.0.1:7860';
+                gatewayUrl = document.getElementById('gatewayUrl').value.trim();  // 可以为空
                 gatewayToken = document.getElementById('gatewayToken').value.trim();
                 agentId = document.getElementById('agentId').value.trim() || 'main';
                 var syncKey = document.getElementById('syncSessionKey').value.trim();
@@ -363,7 +372,7 @@
             
             setStatus('loading', '正在同步历史...');
             
-            var apiUrl = gatewayUrl.replace(/\/$/, '') + '/tools/invoke';
+            var apiUrl = getGatewayUrl() + '/tools/invoke';
             
             var body = {
                 tool: 'sessions_history',
@@ -469,7 +478,7 @@
             inputEl.value = '';
             
             // 构建请求
-            var apiUrl = gatewayUrl.replace(/\/$/, '') + '/v1/chat/completions';
+            var apiUrl = getGatewayUrl() + '/v1/chat/completions';
             
             var body = {
                 model: 'openclaw:' + agentId,
