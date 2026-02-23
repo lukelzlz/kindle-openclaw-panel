@@ -220,6 +220,7 @@
     <div class="input-area">
         <textarea id="inputText" placeholder="输入消息... (Ctrl+Enter 发送)" onkeydown="handleKey(event)"></textarea>
         <button id="sendBtn" class="btn btn-full" onclick="sendMessage()">发送</button>
+        <button class="btn btn-full btn-outline" onclick="clearHistory()" style="margin-top:8px">清除历史</button>
     </div>
 
     <script>
@@ -284,7 +285,11 @@
         // ============ 消息显示 ============
         function addMessage(role, content) {
             messages.push({role: role, content: content});
-            
+            saveHistory();
+            renderMessage(role, content);
+        }
+        
+        function renderMessage(role, content) {
             var div = document.createElement('div');
             div.className = 'msg msg-' + role;
             
@@ -302,6 +307,39 @@
             
             // 滚动到底部
             messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+        
+        function renderAllMessages() {
+            messagesEl.innerHTML = '';
+            for (var i = 0; i < messages.length; i++) {
+                renderMessage(messages[i].role, messages[i].content);
+            }
+        }
+        
+        function saveHistory() {
+            try {
+                localStorage.setItem('oc_messages', JSON.stringify(messages));
+            } catch(e) {}
+        }
+        
+        function loadHistory() {
+            try {
+                var saved = localStorage.getItem('oc_messages');
+                if (saved) {
+                    messages = JSON.parse(saved);
+                    renderAllMessages();
+                }
+            } catch(e) {
+                messages = [];
+            }
+        }
+        
+        function clearHistory() {
+            if (confirm('确定清除所有聊天记录？')) {
+                messages = [];
+                saveHistory();
+                messagesEl.innerHTML = '';
+            }
         }
         
         function addSystemMsg(text) {
@@ -405,6 +443,7 @@
         
         // ============ 启动 ============
         loadConfig();
+        loadHistory();
         inputEl.focus();
     </script>
 </body>
