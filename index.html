@@ -207,7 +207,12 @@
         <input type="text" id="agentId" value="main" placeholder="main">
         <div class="hint">OpenClaw agent id，默认 main</div>
         
+        <label>同步 Session Key (可选):</label>
+        <input type="text" id="syncSessionKey" placeholder="如 agent:main:main">
+        <div class="hint">填入后可从服务端同步该 session 的历史</div>
+        
         <button class="btn btn-full" onclick="saveConfig()">保存配置</button>
+        <button class="btn btn-full btn-outline" onclick="syncFromServer()" style="margin-top:8px">从服务端同步历史</button>
     </div>
     
     <!-- 状态栏 -->
@@ -245,6 +250,7 @@
                 var url = localStorage.getItem('oc_gateway_url');
                 var token = localStorage.getItem('oc_gateway_token');
                 var agent = localStorage.getItem('oc_agent_id');
+                var syncKey = localStorage.getItem('oc_sync_session_key');
                 
                 if (url) {
                     gatewayUrl = url;
@@ -258,18 +264,23 @@
                     agentId = agent;
                     document.getElementById('agentId').value = agent;
                 }
+                if (syncKey) {
+                    document.getElementById('syncSessionKey').value = syncKey;
+                }
             } catch(e) {}
         }
         
         function saveConfig() {
             try {
-                gatewayUrl = document.getElementById('gatewayUrl').value.trim() || 'http://127.0.0.1:18789';
+                gatewayUrl = document.getElementById('gatewayUrl').value.trim() || 'http://127.0.0.1:7860';
                 gatewayToken = document.getElementById('gatewayToken').value.trim();
                 agentId = document.getElementById('agentId').value.trim() || 'main';
+                var syncKey = document.getElementById('syncSessionKey').value.trim();
                 
                 localStorage.setItem('oc_gateway_url', gatewayUrl);
                 localStorage.setItem('oc_gateway_token', gatewayToken);
                 localStorage.setItem('oc_agent_id', agentId);
+                localStorage.setItem('oc_sync_session_key', syncKey);
                 
                 setStatus('ok', '配置已保存');
             } catch(e) {
@@ -339,6 +350,102 @@
                 messages = [];
                 saveHistory();
                 messagesEl.innerHTML = '';
+            }
+        }
+        
+        // ============ 从服务端同步历史 ============
+        function syncFromServer() {
+            var sessionKey = document.getElementById('syncSessionKey').value.trim();
+            if (!sessionKey) {
+                alert('请先填写要同步的 Session Key');
+                return;
+            }
+            
+            setStatus('loading', '正在同步历史...');
+            
+            var apiUrl = gatewayUrl.replace(/\/$/, '') + '/tools/invoke';
+            
+            var body = {
+                tool: 'sessions_history',
+                args: {
+                    sessionKey: sessionKey,
+                    limit: 100
+                }
+            };
+            
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', apiUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            
+            if (gatewayToken) {
+                xhr.setRequestHeader('Authorization', 'Bearer ' + gatewayToken);
+            }
+            
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            var resp = JSON.parse(xhr.responseText);
+                            if (resp.ok && resp.result && resp.result.messages) {
+                                var serverMsgs = resp.result.messages;
+                                messages = [];
+                                
+                                for (var i = 0; i < serverMsgs.length; i++) {
+                                    var msg = serverMsgs[i];
+                                    var role = msg.role;
+                                    var content = '';
+                                    
+                                    // 提取文本内容
+                                    if (typeof msg.content === 'string') {
+                                        content = msg.content;
+                                    } else if (msg.content && msg.content.length) {
+                                        for (var j = 0; j < msg.content.length; j++) {
+                                            var block = msg.content[j];
+                                            if (block.type === 'text' && block.text) {
+                                                content += block.text;
+                                            } else if (block.type === 'toolCall') {
+                                                content += '[调用工具: ' + block.name + ']\n';
+                                            } else if (block.type === 'thinking') {
+                                                // 跳过 thinking 块
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (content && content.trim()) {
+                                        messages.push({role: role, content: content.trim()});
+                                    }
+                                }
+                                
+                                saveHistory();
+                                renderAllMessages();
+                                setStatus('ok', '已同步 ' + messages.length + ' 条消息');
+                            } else {
+                                setStatus('error', '同步失败: 无效响应');
+                            }
+                        } catch(e) {
+                            setStatus('error', '同步失败: ' + e.message);
+                        }
+                    } else {
+                        var errText = '同步失败 (' + xhr.status + ')';
+                        try {
+                            var errJson = JSON.parse(xhr.responseText);
+                            if (errJson.error) {
+                                errText = errJson.error.message || errJson.error.type || JSON.stringify(errJson.error);
+                            }
+                        } catch(e) {}
+                        setStatus('error', errText);
+                    }
+                }
+            };
+            
+            xhr.onerror = function() {
+                setStatus('error', '网络错误');
+            };
+            
+            try {
+                xhr.send(JSON.stringify(body));
+            } catch(e) {
+                setStatus('error', '请求失败: ' + e.message);
             }
         }
         
