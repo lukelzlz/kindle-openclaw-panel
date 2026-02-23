@@ -8,21 +8,25 @@
         /*
          * OpenClaw Kindle 聊天面板
          * 
+         * 【使用前配置】
+         * 需要先在 Gateway 配置中启用 Chat Completions API:
+         * 
+         * 在 ~/.openclaw/config 中添加:
+         * gateway: {
+         *   http: {
+         *     endpoints: {
+         *       chatCompletions: { enabled: true }
+         *     }
+         *   }
+         * }
+         * 
+         * 或者运行: openclaw config patch '{\"gateway\":{\"http\":{\"endpoints\":{\"chatCompletions\":{\"enabled\":true}}}}}'
+         * 
          * 【部署说明】
-         * 1. 将此文件放到任意 HTTP 服务器上
-         * 2. 确保OpenClaw Gateway 正在运行
-         * 3. 修改下方 GATEWAY_URL 变量为你的 Gateway 地址
-         * 4. 在 Kindle 实验性浏览器中访问此页面
-         * 
-         * 【Gateway 配置】
-         * - 本地运行: ws://127.0.0.1:18789
-         * - 远程服务器: ws://你的服务器IP:18789
-         * - 如果通过 SSH 隧道: ws://127.0.0.1:18789
-         * 
-         * 【注意事项】
-         * - Kindle 浏览器不支持现代 ES6+ 特性
-         * - 使用传统 callback 风格代码
-         * - 高对比度黑白设计适配 E-ink 屏幕
+         * 1. 将此文件放到 HTTP 服务器（或本地直接打开）
+         * 2. 填写 Gateway 地址（HTTP 端口，同 WebSocket 端口）
+         * 3. 如有 Token 认证，填写 Gateway Token
+         * 4. 在 Kindle 浏览器中访问
          */
         
         * {
@@ -34,478 +38,374 @@
         body {
             font-family: Georgia, "Times New Roman", serif;
             font-size: 18px;
-            line-height: 1.4;
+            line-height: 1.5;
             background: #ffffff;
             color: #000000;
             padding: 10px;
+            max-width: 800px;
+            margin: 0 auto;
         }
         
-        /* 连接状态栏 */
-        .status-bar {
-            background: #000000;
-            color: #ffffff;
-            padding: 8px 12px;
-            margin-bottom: 10px;
-            font-weight: bold;
-            font-size: 16px;
-        }
-        
-        .status-connected {
-            background: #000000;
-        }
-        
-        .status-disconnected {
-            background: #333333;
-        }
-        
-        .status-connecting {
-            background: #666666;
-        }
-        
-        /* 消息容器 */
-        .messages {
-            height: 60vh;
-            overflow-y: scroll;
-            border: 2px solid #000000;
-            padding: 10px;
-            margin-bottom: 10px;
-            background: #ffffff;
-        }
-        
-        /* 单条消息 */
-        .message {
-            margin-bottom: 12px;
-            padding: 8px;
-            border-left: 4px solid #000000;
-        }
-        
-        .message-user {
-            background: #f0f0f0;
-            border-left-color: #000000;
-        }
-        
-        .message-ai {
-            background: #ffffff;
-            border-left-color: #666666;
-        }
-        
-        .message-sender {
-            font-weight: bold;
-            font-size: 14px;
-            margin-bottom: 4px;
-            text-transform: uppercase;
-        }
-        
-        .message-content {
-            word-wrap: break-word;
-            white-space: pre-wrap;
-        }
-        
-        /* 输入区域 */
-        .input-area {
-            display: block;
-            width: 100%;
-        }
-        
-        .input-wrapper {
-            display: block;
-            margin-bottom: 10px;
-        }
-        
-        textarea {
-            width: 100%;
-            height: 80px;
-            padding: 10px;
-            font-size: 18px;
-            font-family: Georgia, "Times New Roman", serif;
-            border: 2px solid #000000;
-            background: #ffffff;
-            color: #000000;
-            resize: none;
-        }
-        
-        textarea:focus {
-            outline: 3px solid #000000;
-        }
-        
-        /* 按钮 */
-        .btn {
-            display: block;
-            width: 100%;
-            padding: 15px;
-            font-size: 20px;
-            font-weight: bold;
-            font-family: Georgia, "Times New Roman", serif;
-            border: 2px solid #000000;
-            cursor: pointer;
-            background: #000000;
-            color: #ffffff;
-            -webkit-appearance: none;
-            appearance: none;
-        }
-        
-        .btn:active {
-            background: #333333;
-        }
-        
-        .btn:disabled {
-            background: #999999;
-            border-color: #999999;
-            cursor: not-allowed;
-        }
-        
-        .btn-secondary {
-            background: #ffffff;
-            color: #000000;
-        }
-        
-        .btn-secondary:active {
-            background: #f0f0f0;
-        }
-        
-        /* 按钮组 */
-        .button-group {
-            display: block;
-        }
-        
-        .button-group .btn {
-            margin-bottom: 8px;
-        }
-        
-        .button-group .btn:last-child {
-            margin-bottom: 0;
+        h1 {
+            font-size: 24px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #000;
         }
         
         /* 连接表单 */
-        .connect-form {
-            background: #f8f8f8;
-            padding: 20px;
-            border: 1px solid #000000;
+        .config-form {
+            background: #f5f5f5;
+            padding: 15px;
+            border: 1px solid #000;
             margin-bottom: 15px;
         }
         
-        .connect-form input[type="text"],
-        .connect-form input[type="password"] {
-            width: 100%;
-            padding: 12px;
-            font-size: 16px;
-            font-family: monospace;
-            border: 1px solid #000000;
-            margin-bottom: 15px;
-            background: #ffffff;
-            -webkit-appearance: none;
-        }
-        
-        .connect-form label {
+        .config-form label {
             display: block;
             font-weight: bold;
             margin-bottom: 5px;
             font-size: 14px;
         }
         
-        /* 隐藏类 */
-        .hidden {
-            display: none;
+        .config-form input[type="text"],
+        .config-form input[type="password"],
+        .config-form select {
+            width: 100%;
+            padding: 10px;
+            font-size: 16px;
+            font-family: monospace;
+            border: 1px solid #000;
+            margin-bottom: 12px;
+            background: #fff;
+            -webkit-appearance: none;
         }
         
-        /* 加载指示器 */
-        .loading {
-            text-align: center;
-            padding: 10px;
-            font-style: italic;
-            color: #666666;
+        .config-form .hint {
+            font-size: 12px;
+            color: #666;
+            margin-top: -8px;
+            margin-bottom: 12px;
         }
+        
+        /* 状态栏 */
+        .status-bar {
+            padding: 8px 12px;
+            margin-bottom: 15px;
+            font-weight: bold;
+            font-size: 14px;
+            border: 1px solid #000;
+            background: #f5f5f5;
+        }
+        
+        .status-ok { background: #fff; }
+        .status-error { background: #fdd; }
+        .status-loading { background: #ff9; }
+        
+        /* 消息容器 */
+        .messages {
+            height: 55vh;
+            overflow-y: scroll;
+            border: 1px solid #000;
+            padding: 10px;
+            margin-bottom: 15px;
+            background: #fff;
+        }
+        
+        /* 消息 */
+        .msg {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-left: 3px solid #000;
+        }
+        
+        .msg-user {
+            background: #f0f0f0;
+            border-left-color: #000;
+        }
+        
+        .msg-assistant {
+            background: #fff;
+            border-left-color: #666;
+        }
+        
+        .msg-sender {
+            font-weight: bold;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+            color: #333;
+        }
+        
+        .msg-content {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .msg-system {
+            background: #f9f9f9;
+            border-left-color: #999;
+            font-style: italic;
+            color: #666;
+        }
+        
+        /* 输入区域 */
+        .input-area textarea {
+            width: 100%;
+            height: 80px;
+            padding: 10px;
+            font-size: 16px;
+            font-family: Georgia, serif;
+            border: 1px solid #000;
+            resize: none;
+            margin-bottom: 10px;
+        }
+        
+        /* 按钮 */
+        .btn {
+            padding: 12px 20px;
+            font-size: 18px;
+            font-weight: bold;
+            font-family: Georgia, serif;
+            border: 2px solid #000;
+            cursor: pointer;
+            background: #000;
+            color: #fff;
+            -webkit-appearance: none;
+        }
+        
+        .btn:active { background: #333; }
+        .btn:disabled { background: #999; cursor: not-allowed; }
+        
+        .btn-full { display: block; width: 100%; }
+        
+        .btn-outline {
+            background: #fff;
+            color: #000;
+        }
+        
+        .btn-outline:active { background: #f0f0f0; }
+        
+        /* 隐藏 */
+        .hidden { display: none; }
     </style>
 </head>
 <body>
-    <!-- 连接状态栏 -->
-    <div id="statusBar" class="status-bar status-disconnected">
-        状态: 未连接
+    <h1>OpenClaw Chat</h1>
+    
+    <!-- 配置区域 -->
+    <div id="configArea" class="config-form">
+        <label>Gateway HTTP 地址:</label>
+        <input type="text" id="gatewayUrl" value="http://127.0.0.1:7860" placeholder="http://IP:PORT">
+        <div class="hint">Gateway 的 HTTP 端口（同 WS 端口）</div>
+        
+        <label>Gateway Token:</label>
+        <input type="password" id="gatewayToken" placeholder="留空表示无认证">
+        <div class="hint">如有设置 gateway.auth.token 则填写</div>
+        
+        <label>Agent ID:</label>
+        <input type="text" id="agentId" value="main" placeholder="main">
+        <div class="hint">OpenClaw agent id，默认 main</div>
+        
+        <button class="btn btn-full" onclick="saveConfig()">保存配置</button>
     </div>
     
-    <!-- 连接表单（未连接时显示） -->
-    <div id="connectForm" class="connect-form">
-        <label for="gatewayUrl">Gateway 地址:</label>
-        <input type="text" id="gatewayUrl" value="ws://127.0.0.1:18789" placeholder="ws://IP:PORT">
-        
-        <label for="gatewayToken">Gateway Token (可选):</label>
-        <input type="password" id="gatewayToken" placeholder="留空则无需认证">
-        
-        <button class="btn" onclick="connect()">连接</button>
-    </div>
+    <!-- 状态栏 -->
+    <div id="statusBar" class="status-bar status-ok">就绪</div>
     
-    <!-- 聊天区域（连接后显示） -->
-    <div id="chatArea" class="hidden">
-        <!-- 消息列表 -->
-        <div id="messages" class="messages"></div>
-        
-        <!-- 输入区域 -->
-        <div class="input-area">
-            <div class="input-wrapper">
-                <textarea id="messageInput" placeholder="输入消息..." onkeydown="handleKeyDown(event)"></textarea>
-            </div>
-            <div class="button-group">
-                <button id="sendBtn" class="btn" onclick="sendMessage()">发送</button>
-                <button class="btn btn-secondary" onclick="disconnect()">断开连接</button>
-            </div>
-        </div>
+    <!-- 消息区域 -->
+    <div id="messages" class="messages"></div>
+    
+    <!-- 输入区域 -->
+    <div class="input-area">
+        <textarea id="inputText" placeholder="输入消息... (Ctrl+Enter 发送)" onkeydown="handleKey(event)"></textarea>
+        <button id="sendBtn" class="btn btn-full" onclick="sendMessage()">发送</button>
     </div>
 
     <script>
-        // ============================================
-        // 配置区域
-        // ============================================
-        var GATEWAY_URL = 'ws://127.0.0.1:18789';
+        // ============ 配置 ============
+        var gatewayUrl = 'http://127.0.0.1:7860';
+        var gatewayToken = '';
+        var agentId = 'main';
         
-        // ============================================
-        // 全局变量
-        // ============================================
-        var ws = null;
-        var isConnected = false;
-        var currentSessionId = null;
+        // ============ 状态 ============
+        var isSending = false;
+        var messages = [];
         
-        // ============================================
-        // DOM 元素引用
-        // ============================================
-        var statusBar = document.getElementById('statusBar');
-        var connectForm = document.getElementById('connectForm');
-        var chatArea = document.getElementById('chatArea');
-        var messagesContainer = document.getElementById('messages');
-        var messageInput = document.getElementById('messageInput');
+        // ============ DOM ============
+        var statusEl = document.getElementById('statusBar');
+        var messagesEl = document.getElementById('messages');
+        var inputEl = document.getElementById('inputText');
         var sendBtn = document.getElementById('sendBtn');
-        var gatewayInput = document.getElementById('gatewayUrl');
         
-        // ============================================
-        // 连接管理
-        // ============================================
-        
-        function connect() {
-            var url = gatewayInput.value.trim();
-            var token = document.getElementById('gatewayToken').value.trim();
-            
-            // 保存配置
-            saveConfig();
-            
-            if (!url) {
-                url = GATEWAY_URL;
-            }
-            
-            // 如果有 token，附加到 URL
-            if (token) {
-                url = url + (url.indexOf('?') > -1 ? '&' : '?') + 'token=' + encodeURIComponent(token);
-            }
-            
-            updateStatus('connecting', '状态: 连接中...');
-            
+        // ============ 初始化 ============
+        function loadConfig() {
             try {
-                ws = new WebSocket(url);
+                var url = localStorage.getItem('oc_gateway_url');
+                var token = localStorage.getItem('oc_gateway_token');
+                var agent = localStorage.getItem('oc_agent_id');
                 
-                ws.onopen = function() {
-                    isConnected = true;
-                    updateStatus('connected', '状态: 已连接');
-                    showChatArea();
-                    addSystemMessage('已连接到 OpenClaw Gateway');
-                };
-                
-                ws.onmessage = function(event) {
-                    handleMessage(event.data);
-                };
-                
-                ws.onerror = function(error) {
-                    updateStatus('disconnected', '状态: 连接错误');
-                    addSystemMessage('连接错误，请检查 Gateway 地址');
-                };
-                
-                ws.onclose = function() {
-                    isConnected = false;
-                    updateStatus('disconnected', '状态: 已断开');
-                    showConnectForm();
-                    addSystemMessage('连接已断开');
-                };
-            } catch (e) {
-                updateStatus('disconnected', '状态: 连接失败');
-                alert('无法连接: ' + e.message);
-            }
-        }
-        
-        function disconnect() {
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
-            isConnected = false;
-        }
-        
-        // ============================================
-        // 状态更新
-        // ============================================
-        
-        function updateStatus(status, text) {
-            statusBar.textContent = text;
-            statusBar.className = 'status-bar';
-            
-            if (status === 'connected') {
-                statusBar.className += ' status-connected';
-            } else if (status === 'connecting') {
-                statusBar.className += ' status-connecting';
-            } else {
-                statusBar.className += ' status-disconnected';
-            }
-        }
-        
-        function showChatArea() {
-            connectForm.className = 'hidden';
-            chatArea.className = '';
-            messageInput.focus();
-        }
-        
-        function showConnectForm() {
-            chatArea.className = 'hidden';
-            connectForm.className = 'connect-form';
-        }
-        
-        // ============================================
-        // 消息处理
-        // ============================================
-        
-        function handleMessage(data) {
-            try {
-                var msg = JSON.parse(data);
-                
-                // 处理不同类型的消息
-                if (msg.type === 'session_start') {
-                    currentSessionId = msg.session_id;
-                } else if (msg.type === 'agent_turn') {
-                    // AI 回复
-                    if (msg.message) {
-                        addMessage('ai', msg.message);
-                    }
-                } else if (msg.type === 'user_turn') {
-                    // 用户消息确认（可选显示）
-                } else if (msg.type === 'error') {
-                    addSystemMessage('错误: ' + (msg.message || '未知错误'));
+                if (url) {
+                    gatewayUrl = url;
+                    document.getElementById('gatewayUrl').value = url;
                 }
-            } catch (e) {
-                // 非 JSON 消息，作为普通文本处理
-                addMessage('ai', data);
-            }
+                if (token) {
+                    gatewayToken = token;
+                    document.getElementById('gatewayToken').value = token;
+                }
+                if (agent) {
+                    agentId = agent;
+                    document.getElementById('agentId').value = agent;
+                }
+            } catch(e) {}
         }
         
-        function sendMessage() {
-            var text = messageInput.value.trim();
-            if (!text || !isConnected) {
-                return;
-            }
-            
-            // 显示用户消息
-            addMessage('user', text);
-            
-            // 发送到 Gateway
-            var payload = {
-                type: 'user_turn',
-                message: text
-            };
-            
-            if (currentSessionId) {
-                payload.session_id = currentSessionId;
-            }
-            
+        function saveConfig() {
             try {
-                ws.send(JSON.stringify(payload));
-            } catch (e) {
-                addSystemMessage('发送失败: ' + e.message);
+                gatewayUrl = document.getElementById('gatewayUrl').value.trim() || 'http://127.0.0.1:18789';
+                gatewayToken = document.getElementById('gatewayToken').value.trim();
+                agentId = document.getElementById('agentId').value.trim() || 'main';
+                
+                localStorage.setItem('oc_gateway_url', gatewayUrl);
+                localStorage.setItem('oc_gateway_token', gatewayToken);
+                localStorage.setItem('oc_agent_id', agentId);
+                
+                setStatus('ok', '配置已保存');
+            } catch(e) {
+                setStatus('error', '保存失败: ' + e.message);
             }
-            
-            // 清空输入框
-            messageInput.value = '';
-            messageInput.focus();
         }
         
-        // ============================================
-        // UI 消息显示
-        // ============================================
+        function setStatus(type, text) {
+            statusEl.textContent = text;
+            statusEl.className = 'status-bar status-' + type;
+        }
         
-        function addMessage(sender, content) {
+        // ============ 消息显示 ============
+        function addMessage(role, content) {
+            messages.push({role: role, content: content});
+            
             var div = document.createElement('div');
-            div.className = 'message message-' + sender;
+            div.className = 'msg msg-' + role;
             
             var senderDiv = document.createElement('div');
-            senderDiv.className = 'message-sender';
-            senderDiv.textContent = sender === 'user' ? '你' : 'AI';
+            senderDiv.className = 'msg-sender';
+            senderDiv.textContent = role === 'user' ? '你' : (role === 'assistant' ? 'AI' : '系统');
             
             var contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
+            contentDiv.className = 'msg-content';
             contentDiv.textContent = content;
             
             div.appendChild(senderDiv);
             div.appendChild(contentDiv);
+            messagesEl.appendChild(div);
             
-            messagesContainer.appendChild(div);
-            scrollToBottom();
+            // 滚动到底部
+            messagesEl.scrollTop = messagesEl.scrollHeight;
         }
         
-        function addSystemMessage(content) {
+        function addSystemMsg(text) {
             var div = document.createElement('div');
-            div.className = 'message';
-            div.style.borderLeftColor = '#999999';
-            div.style.background = '#f9f9f9';
-            div.style.fontStyle = 'italic';
-            div.textContent = content;
+            div.className = 'msg msg-system';
+            div.textContent = text;
+            messagesEl.appendChild(div);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+        
+        // ============ 发送消息 ============
+        function sendMessage() {
+            if (isSending) return;
             
-            messagesContainer.appendChild(div);
-            scrollToBottom();
+            var text = inputEl.value.trim();
+            if (!text) return;
+            
+            // 显示用户消息
+            addMessage('user', text);
+            inputEl.value = '';
+            
+            // 构建请求
+            var apiUrl = gatewayUrl.replace(/\/$/, '') + '/v1/chat/completions';
+            
+            var body = {
+                model: 'openclaw:' + agentId,
+                messages: messages.slice(), // 发送完整历史
+                stream: false
+            };
+            
+            isSending = true;
+            sendBtn.disabled = true;
+            setStatus('loading', '等待回复...');
+            
+            // 发送请求
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', apiUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            
+            if (gatewayToken) {
+                xhr.setRequestHeader('Authorization', 'Bearer ' + gatewayToken);
+            }
+            
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    isSending = false;
+                    sendBtn.disabled = false;
+                    
+                    if (xhr.status === 200) {
+                        try {
+                            var resp = JSON.parse(xhr.responseText);
+                            var content = resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content;
+                            if (content) {
+                                addMessage('assistant', content);
+                                setStatus('ok', '就绪');
+                            } else {
+                                addSystemMsg('收到空响应');
+                                setStatus('error', '空响应');
+                            }
+                        } catch(e) {
+                            addSystemMsg('解析响应失败: ' + e.message);
+                            setStatus('error', '解析失败');
+                        }
+                    } else {
+                        var errText = '请求失败 (' + xhr.status + ')';
+                        try {
+                            var errJson = JSON.parse(xhr.responseText);
+                            if (errJson.error && errJson.error.message) {
+                                errText = errJson.error.message;
+                            }
+                        } catch(e) {}
+                        addSystemMsg(errText);
+                        setStatus('error', errText);
+                    }
+                }
+            };
+            
+            xhr.onerror = function() {
+                isSending = false;
+                sendBtn.disabled = false;
+                addSystemMsg('网络错误，无法连接 Gateway');
+                setStatus('error', '网络错误');
+            };
+            
+            try {
+                xhr.send(JSON.stringify(body));
+            } catch(e) {
+                isSending = false;
+                sendBtn.disabled = false;
+                addSystemMsg('发送失败: ' + e.message);
+                setStatus('error', '发送失败');
+            }
         }
         
-        function scrollToBottom() {
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        }
-        
-        // ============================================
-        // 键盘事件
-        // ============================================
-        
-        function handleKeyDown(event) {
-            // Ctrl+Enter 或 Cmd+Enter 发送消息
-            if (event.keyCode === 13 && (event.ctrlKey || event.metaKey)) {
-                event.preventDefault();
+        function handleKey(e) {
+            if (e.keyCode === 13 && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
                 sendMessage();
             }
         }
         
-        // ============================================
-        // 初始化
-        // ============================================
-        
-        // 从 localStorage 读取保存的配置
-        function loadConfig() {
-            try {
-                var savedUrl = localStorage.getItem('openclaw_gateway_url');
-                var savedToken = localStorage.getItem('openclaw_gateway_token');
-                
-                if (savedUrl) {
-                    gatewayInput.value = savedUrl;
-                }
-                if (savedToken) {
-                    document.getElementById('gatewayToken').value = savedToken;
-                }
-            } catch (e) {
-                // localStorage 不可用，忽略
-            }
-        }
-        
-        // 保存配置到 localStorage
-        function saveConfig() {
-            try {
-                localStorage.setItem('openclaw_gateway_url', gatewayInput.value);
-                localStorage.setItem('openclaw_gateway_token', document.getElementById('gatewayToken').value);
-            } catch (e) {
-                // localStorage 不可用，忽略
-            }
-        }
-        
-        // 页面加载时
+        // ============ 启动 ============
         loadConfig();
-        gatewayInput.focus();
+        inputEl.focus();
     </script>
 </body>
 </html>
