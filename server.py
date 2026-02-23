@@ -60,15 +60,42 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
         req = urllib.request.Request(target_url, data=body, headers=headers, method=self.command)
         
         try:
-            with urllib.request.urlopen(req, timeout=60) as response:
-                self.send_response(response.status)
-                self.send_cors_headers()
-                # 复制响应头
-                for key, value in response.getheaders():
-                    if key.lower() not in ('transfer-encoding',):
-                        self.send_header(key, value)
-                self.end_headers()
-                self.wfile.write(response.read())
+            with urllib.request.urlopen(req, timeout=120) as response:
+                # 检查是否是流式响应
+                is_stream = self.path == '/v1/chat/completions' and body and b'"stream":true' in body
+                
+                if is_stream:
+                    # 流式转发
+                    self.send_response(response.status)
+                    self.send_cors_headers()
+                    # SSE 必需的头
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Cache-Control', 'no-cache')
+                    self.send_header('Connection', 'keep-alive')
+                    self.end_headers()
+                    
+                    # 逐块转发
+                    while True:
+                        chunk = response.read(4096)
+                        if not chunk:
+                            break
+                        try:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        except:
+                            # 客户端断开连接
+                            break
+                else:
+                    # 非流式，一次性转发
+                    self.send_response(response.status)
+                    self.send_cors_headers()
+                    # 复制响应头
+                    for key, value in response.getheaders():
+                        if key.lower() not in ('transfer-encoding',):
+                            self.send_header(key, value)
+                    self.end_headers()
+                    self.wfile.write(response.read())
+                    
         except urllib.error.URLError as e:
             self.send_response(502)
             self.send_cors_headers()
