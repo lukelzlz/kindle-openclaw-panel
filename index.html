@@ -616,8 +616,15 @@
                         updateSystemMsg('⏳ 正在解析响应...');
                         try {
                             var resp = JSON.parse(xhr.responseText);
-                            if (resp.ok && resp.result && resp.result.messages) {
-                                var serverMsgs = resp.result.messages;
+                            // 兼容两种格式: resp.result.messages 或 resp.messages
+                            var serverMsgs = null;
+                            if (resp.result && resp.result.messages) {
+                                serverMsgs = resp.result.messages;
+                            } else if (resp.messages) {
+                                serverMsgs = resp.messages;
+                            }
+                            
+                            if (resp.ok && serverMsgs) {
                                 messages = [];
                                 
                                 for (var i = 0; i < serverMsgs.length; i++) {
@@ -658,8 +665,7 @@
                                 // 显示详细错误信息
                                 var errDetail = '';
                                 if (!resp.ok) errDetail += 'resp.ok=false; ';
-                                if (!resp.result) errDetail += '无 result 字段; ';
-                                else if (!resp.result.messages) errDetail += '无 messages 字段; ';
+                                if (!serverMsgs) errDetail += '无 messages 字段; ';
                                 errDetail += '响应: ' + JSON.stringify(resp).substring(0, 200);
                                 updateSystemMsg('❌ 同步失败: ' + errDetail);
                                 setStatus('error', '同步失败');
