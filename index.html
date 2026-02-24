@@ -581,11 +581,16 @@
         function syncFromServer() {
             var sessionKey = document.getElementById('syncSessionKey').value.trim();
             if (!sessionKey) {
-                alert('请先填写要同步的 Session Key');
+                addSystemMsg('⚠️ 请先填写要同步的 Session Key', false, 0);
                 return;
             }
             
-            setStatus('loading', '正在同步历史...');
+            // 清除之前的系统消息
+            var lastSysMsg = document.getElementById('lastSystemMsg');
+            if (lastSysMsg) lastSysMsg.remove();
+            
+            setStatus('loading', '正在连接服务端...');
+            addSystemMsg('⏳ 正在同步历史消息...', false, 0);
             
             var apiUrl = getGatewayUrl() + '/tools/invoke';
             
@@ -608,6 +613,7 @@
             xhr.onreadystatechange = function() {
                 if (xhr.readyState === 4) {
                     if (xhr.status === 200) {
+                        updateSystemMsg('⏳ 正在解析响应...');
                         try {
                             var resp = JSON.parse(xhr.responseText);
                             if (resp.ok && resp.result && resp.result.messages) {
@@ -642,34 +648,72 @@
                                 
                                 saveHistory();
                                 renderAllMessages();
+                                
+                                // 移除系统消息
+                                var sysMsg = document.getElementById('lastSystemMsg');
+                                if (sysMsg) sysMsg.remove();
+                                
                                 setStatus('ok', '已同步 ' + messages.length + ' 条消息');
                             } else {
-                                setStatus('error', '同步失败: 无效响应');
+                                // 显示详细错误信息
+                                var errDetail = '';
+                                if (!resp.ok) errDetail += 'resp.ok=false; ';
+                                if (!resp.result) errDetail += '无 result 字段; ';
+                                else if (!resp.result.messages) errDetail += '无 messages 字段; ';
+                                errDetail += '响应: ' + JSON.stringify(resp).substring(0, 200);
+                                updateSystemMsg('❌ 同步失败: ' + errDetail);
+                                setStatus('error', '同步失败');
                             }
                         } catch(e) {
-                            setStatus('error', '同步失败: ' + e.message);
+                            // 解析错误，显示原始响应
+                            var rawPreview = xhr.responseText.substring(0, 300);
+                            updateSystemMsg('❌ 解析失败: ' + e.message + '\n原始响应: ' + rawPreview);
+                            setStatus('error', '解析失败');
                         }
                     } else {
-                        var errText = '同步失败 (' + xhr.status + ')';
+                        // HTTP 错误
+                        var errText = '同步失败 (HTTP ' + xhr.status + ')';
+                        var errDetail = '';
+                        
+                        // 尝试解析错误响应
                         try {
                             var errJson = JSON.parse(xhr.responseText);
                             if (errJson.error) {
-                                errText = errJson.error.message || errJson.error.type || JSON.stringify(errJson.error);
+                                if (errJson.error.message) errDetail += errJson.error.message;
+                                if (errJson.error.type) errDetail += ' [' + errJson.error.type + ']';
+                                if (errJson.error.code) errDetail += ' (code: ' + errJson.error.code + ')';
+                            } else {
+                                errDetail = JSON.stringify(errJson).substring(0, 150);
                             }
-                        } catch(e) {}
-                        setStatus('error', errText);
+                        } catch(e) {
+                            // 非 JSON 响应
+                            errDetail = xhr.responseText.substring(0, 150) || '(空响应)';
+                        }
+                        
+                        if (errDetail) errText += '\n' + errDetail;
+                        updateSystemMsg('❌ ' + errText);
+                        setStatus('error', 'HTTP ' + xhr.status);
                     }
                 }
             };
             
             xhr.onerror = function() {
+                updateSystemMsg('❌ 网络错误: 无法连接到服务端\nURL: ' + apiUrl);
                 setStatus('error', '网络错误');
             };
+            
+            xhr.ontimeout = function() {
+                updateSystemMsg('❌ 请求超时');
+                setStatus('error', '请求超时');
+            };
+            
+            xhr.timeout = 30000;  // 30 秒超时
             
             try {
                 xhr.send(JSON.stringify(body));
             } catch(e) {
-                setStatus('error', '请求失败: ' + e.message);
+                updateSystemMsg('❌ 请求失败: ' + e.message);
+                setStatus('error', '请求失败');
             }
         }
         
