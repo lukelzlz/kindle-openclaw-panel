@@ -278,6 +278,12 @@
         <input type="text" id="syncSessionKey" placeholder="如 agent:main:main">
         <div class="hint">填入后可从服务端同步该 session 的历史</div>
         
+        <label style="display:flex;align-items:center;margin-top:12px">
+            <input type="checkbox" id="allowFallback" checked style="width:auto;margin-right:8px">
+            <span>允许流式传输回退（Kindle 兼容）</span>
+        </label>
+        <div class="hint">不支持流式时自动切换到普通模式</div>
+        
         <button class="btn btn-full" onclick="saveConfig()">保存配置</button>
         <button class="btn btn-full btn-outline" onclick="syncFromServer()" style="margin-top:8px">从服务端同步历史</button>
     </div>
@@ -300,6 +306,7 @@
         var gatewayUrl = '';  // 空则使用当前 origin（通过代理）
         var gatewayToken = '';
         var agentId = 'main';
+        var allowFallback = true;  // 允许流式传输回退
         
         // ============ 状态 ============
         var isSending = false;
@@ -307,6 +314,7 @@
         var lastFailedRequest = null;  // 保存失败请求用于重试
         var autoRetryCount = 0;  // 自动重试计数
         var maxAutoRetries = 2;  // 最多自动重试次数（共3次请求）
+        var supportsStreaming = false;  // 浏览器是否支持流式
         
         // ============ 工具函数 ============
         function getGatewayUrl() {
@@ -322,6 +330,21 @@
         var messagesEl = document.getElementById('messages');
         var inputEl = document.getElementById('inputText');
         var sendBtn = document.getElementById('sendBtn');
+        
+        // ============ 初始化 ============
+        // 检测浏览器是否支持流式传输
+        supportsStreaming = (function() {
+            try {
+                return typeof ReadableStream !== 'undefined' && 
+                       typeof fetch === 'function';
+            } catch(e) {
+                return false;
+            }
+        })();
+        
+        // 页面加载时初始化
+        loadConfig();
+        loadHistory();
         
         // ============ 初始化 ============
         function toggleConfig() {
@@ -342,6 +365,7 @@
                 var token = localStorage.getItem('oc_gateway_token');
                 var agent = localStorage.getItem('oc_agent_id');
                 var syncKey = localStorage.getItem('oc_sync_session_key');
+                var fallback = localStorage.getItem('oc_allow_fallback');
                 
                 if (url) {
                     gatewayUrl = url;
@@ -358,6 +382,9 @@
                 if (syncKey) {
                     document.getElementById('syncSessionKey').value = syncKey;
                 }
+                // 默认允许回退
+                allowFallback = (fallback === null) ? true : (fallback === 'true');
+                document.getElementById('allowFallback').checked = allowFallback;
             } catch(e) {}
         }
         
@@ -367,11 +394,13 @@
                 gatewayToken = document.getElementById('gatewayToken').value.trim();
                 agentId = document.getElementById('agentId').value.trim() || 'main';
                 var syncKey = document.getElementById('syncSessionKey').value.trim();
+                allowFallback = document.getElementById('allowFallback').checked;
                 
                 localStorage.setItem('oc_gateway_url', gatewayUrl);
                 localStorage.setItem('oc_gateway_token', gatewayToken);
                 localStorage.setItem('oc_agent_id', agentId);
                 localStorage.setItem('oc_sync_session_key', syncKey);
+                localStorage.setItem('oc_allow_fallback', allowFallback.toString());
                 
                 // 保存后自动收起配置
                 var area = document.getElementById('configArea');
@@ -519,11 +548,33 @@
         }
         
         function clearHistory() {
-            if (confirm('确定清除所有聊天记录？')) {
+            // Kindle 浏览器可能不支持 confirm/alert，使用按钮确认模式
+            var btn = event && event.target ? event.target : document.activeElement;
+            
+            if (btn && btn.getAttribute('data-confirm') === '1') {
+                // 已确认，执行清除
                 messages = [];
                 saveHistory();
                 messagesEl.innerHTML = '';
+                btn.textContent = '清除历史';
+                btn.removeAttribute('data-confirm');
+                setStatus('ok', '已清除聊天记录');
+                return false;
             }
+            
+            // 首次点击，请求确认
+            if (btn) {
+                btn.textContent = '⚠️ 确认清除？再点一次';
+                btn.setAttribute('data-confirm', '1');
+                // 3秒后自动恢复
+                setTimeout(function() {
+                    if (btn.getAttribute('data-confirm') === '1') {
+                        btn.textContent = '清除历史';
+                        btn.removeAttribute('data-confirm');
+                    }
+                }, 3000);
+            }
+            return false;
         }
         
         // ============ 从服务端同步历史 ============
@@ -622,26 +673,49 @@
             }
         }
         
-        function addSystemMsg(text, showRetry) {
+        function addSystemMsg(text, showRetry, httpStatus) {
             var div = document.createElement('div');
             div.className = 'msg msg-system';
+            div.id = 'lastSystemMsg';  // 用于更新
             
             var contentSpan = document.createElement('span');
-            contentSpan.textContent = text;
+            contentSpan.id = 'systemMsgText';
+            
+            // 如果是 500 错误，显示更友好的提示
+            if (httpStatus && httpStatus >= 500) {
+                contentSpan.innerHTML = '⚠️ 服务器暂时不可用 (' + httpStatus + ')';
+            } else {
+                contentSpan.textContent = text;
+            }
             div.appendChild(contentSpan);
             
             // 添加重试按钮
             if (showRetry && lastFailedRequest) {
                 var retryBtn = document.createElement('button');
                 retryBtn.className = 'btn btn-outline';
+                retryBtn.id = 'retryBtn';
                 retryBtn.style.cssText = 'margin-left:10px;padding:4px 12px;font-size:14px;';
-                retryBtn.textContent = '重试';
+                retryBtn.textContent = '🔄 重试';
                 retryBtn.onclick = retryLastRequest;
                 div.appendChild(retryBtn);
             }
             
             messagesEl.appendChild(div);
             messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+        
+        // 更新系统消息（用于重试进度）
+        function updateSystemMsg(text) {
+            var textEl = document.getElementById('systemMsgText');
+            if (textEl) {
+                textEl.textContent = text;
+            }
+        }
+        
+        // 移除重试按钮
+        function removeRetryButton() {
+            var btn = document.getElementById('retryBtn');
+            if (btn) btn.remove();
         }
         
         // ============ 发送消息 ============
@@ -665,10 +739,24 @@
             // 构建请求
             var apiUrl = getGatewayUrl() + '/v1/chat/completions';
             
+            // 判断是否使用流式传输
+            // supportsStreaming: 浏览器是否支持
+            // allowFallback: 不支持时是否允许降级
+            if (!supportsStreaming && !allowFallback) {
+                // 不支持流式且不允许回退
+                addSystemMsg('⚠️ 浏览器不支持流式传输，请启用"允许流式传输回退"选项', false, 0);
+                setStatus('error', '不兼容');
+                isSending = false;
+                sendBtn.disabled = false;
+                return;
+            }
+            
+            var useStreaming = supportsStreaming;
+
             var body = {
                 model: 'openclaw:' + agentId,
                 messages: msgHistory,
-                stream: true  // 启用流式传输
+                stream: useStreaming  // 根据浏览器支持和配置决定
             };
             
             // 保存请求用于重试
@@ -677,14 +765,29 @@
             isSending = true;
             sendBtn.disabled = true;
             
+            // 清除之前的系统消息
+            var lastSysMsg = document.getElementById('lastSystemMsg');
+            if (lastSysMsg) lastSysMsg.remove();
+            
             if (isRetry) {
-                setStatus('loading', '重试中... (第' + autoRetryCount + '次)');
+                setStatus('loading', '重试中... (第 ' + (autoRetryCount + 1) + ' 次)');
             } else {
                 autoRetryCount = 0;
                 setStatus('loading', '等待回复...');
             }
             
-            // 使用 fetch 处理流式响应
+            // 判断使用流式还是普通请求
+            if (useStreaming) {
+                // 使用 fetch 处理流式响应
+                sendStreamingRequest(apiUrl, body);
+            } else {
+                // 使用 XHR 处理普通请求（兼容模式）
+                sendNormalRequest(apiUrl, body);
+            }
+        }
+        
+        // 流式请求
+        function sendStreamingRequest(apiUrl, body) {
             var headers = {'Content-Type': 'application/json'};
             if (gatewayToken) {
                 headers['Authorization'] = 'Bearer ' + gatewayToken;
@@ -697,17 +800,34 @@
             })
             .then(function(response) {
                 if (!response.ok) {
-                    // 500 错误自动重试
+                    // 5xx 服务器错误 - 自动重试
                     if (response.status >= 500 && response.status < 600 && autoRetryCount < maxAutoRetries) {
                         autoRetryCount++;
-                        addSystemMsg('服务器错误 (' + response.status + ')，自动重试中...');
+                        updateSystemMsg('⏳ 服务器错误 (' + response.status + ')，自动重试第 ' + autoRetryCount + ' 次...');
                         setTimeout(function() {
                             sendRequest(lastFailedRequest, true);
                         }, 1500);
                         return null;
                     }
-                    throw new Error('HTTP ' + response.status);
+                    
+                    // 其他错误或重试次数用尽
+                    var errorMsg = '请求失败';
+                    var errorStatus = response.status;
+                    
+                    if (response.status >= 500) {
+                        errorMsg = '服务器错误';
+                    } else if (response.status === 401 || response.status === 403) {
+                        errorMsg = '认证失败，请检查 Token';
+                    } else if (response.status === 404) {
+                        errorMsg = '接口不存在';
+                    }
+                    
+                    throw {message: errorMsg, status: errorStatus};
                 }
+                
+                // 移除可能存在的系统消息
+                var sysMsg = document.getElementById('lastSystemMsg');
+                if (sysMsg) sysMsg.remove();
                 
                 // 创建一个空的 AI 消息占位
                 renderMessage('assistant', '', true);
@@ -780,14 +900,110 @@
                 isSending = false;
                 sendBtn.disabled = false;
                 
-                var errText = error.message || '请求失败';
-                if (autoRetryCount >= maxAutoRetries) {
-                    errText += ' (已重试' + maxAutoRetries + '次)';
-                }
+                var errText = error.message || error || '请求失败';
+                var httpStatus = error.status || 0;
                 
-                addSystemMsg(errText, true);
-                setStatus('error', errText);
+                // 如果是 500 错误且重试用尽，显示重试按钮
+                if (httpStatus >= 500 && autoRetryCount >= maxAutoRetries) {
+                    addSystemMsg(errText, true, httpStatus);
+                    setStatus('error', '服务器错误 - 可手动重试');
+                } else {
+                    addSystemMsg(errText, httpStatus === 0, httpStatus);
+                    setStatus('error', errText);
+                }
             });
+        }
+        
+        // 普通请求（兼容模式）
+        function sendNormalRequest(apiUrl, body) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', apiUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            
+            if (gatewayToken) {
+                xhr.setRequestHeader('Authorization', 'Bearer ' + gatewayToken);
+            }
+            
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    isSending = false;
+                    sendBtn.disabled = false;
+                    
+                    if (xhr.status === 200) {
+                        try {
+                            var resp = JSON.parse(xhr.responseText);
+                            var content = '';
+                            
+                            if (resp.choices && resp.choices[0] && resp.choices[0].message) {
+                                content = resp.choices[0].message.content || '';
+                            }
+                            
+                            // 移除可能存在的系统消息
+                            var sysMsg = document.getElementById('lastSystemMsg');
+                            if (sysMsg) sysMsg.remove();
+                            
+                            // 显示 AI 消息
+                            addMessage('assistant', content);
+                            
+                            autoRetryCount = 0;
+                            lastFailedRequest = null;
+                            setStatus('ok', '就绪');
+                        } catch(e) {
+                            addSystemMsg('响应解析失败', false);
+                            setStatus('error', '响应解析失败');
+                        }
+                    } else {
+                        // 错误处理
+                        var errText = '请求失败';
+                        var httpStatus = xhr.status;
+                        
+                        // 5xx 服务器错误 - 自动重试
+                        if (httpStatus >= 500 && httpStatus < 600 && autoRetryCount < maxAutoRetries) {
+                            autoRetryCount++;
+                            addSystemMsg('⏳ 服务器错误 (' + httpStatus + ')，自动重试第 ' + autoRetryCount + ' 次...', false);
+                            setTimeout(function() {
+                                sendRequest(lastFailedRequest, true);
+                            }, 1500);
+                            isSending = true;
+                            sendBtn.disabled = true;
+                            return;
+                        }
+                        
+                        if (httpStatus >= 500) {
+                            errText = '服务器错误';
+                        } else if (httpStatus === 401 || httpStatus === 403) {
+                            errText = '认证失败，请检查 Token';
+                        } else if (httpStatus === 404) {
+                            errText = '接口不存在';
+                        }
+                        
+                        // 如果是 500 错误且重试用尽，显示重试按钮
+                        if (httpStatus >= 500 && autoRetryCount >= maxAutoRetries) {
+                            addSystemMsg(errText, true, httpStatus);
+                            setStatus('error', '服务器错误 - 可手动重试');
+                        } else {
+                            addSystemMsg(errText, httpStatus === 0, httpStatus);
+                            setStatus('error', errText);
+                        }
+                    }
+                }
+            };
+            
+            xhr.onerror = function() {
+                isSending = false;
+                sendBtn.disabled = false;
+                addSystemMsg('网络错误', true);
+                setStatus('error', '网络错误');
+            };
+            
+            try {
+                xhr.send(JSON.stringify(body));
+            } catch(e) {
+                isSending = false;
+                sendBtn.disabled = false;
+                addSystemMsg('请求失败: ' + e.message, false);
+                setStatus('error', '请求失败: ' + e.message);
+            }
         }
         
         // 手动重试
@@ -804,9 +1020,7 @@
             }
         }
         
-        // ============ 启动 ============
-        loadConfig();
-        loadHistory();
+        // 启动
         inputEl.focus();
     </script>
 </body>
