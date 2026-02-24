@@ -306,7 +306,7 @@
     <div class="input-area">
         <textarea id="inputText" placeholder="输入消息... (Ctrl+Enter 发送)" onkeydown="handleKey(event)"></textarea>
         <button id="sendBtn" class="btn btn-full" onclick="sendMessage()">发送</button>
-        <button class="btn btn-full btn-outline" onclick="clearHistory()" style="margin-top:8px">清除历史</button>
+        <button id="clearBtn" class="btn btn-full btn-outline" onclick="clearHistory(event)" style="margin-top:8px">清除历史</button>
     </div>
 
     <script>
@@ -328,6 +328,8 @@
         var reconnectAttempts = 0;
         var maxReconnectAttempts = 5;
         var reconnectDelay = 2000;
+        var streamingTimeout = null;
+        var maxStreamingTime = 120000; // 2分钟超时
         
         // ============ DOM ============
         var statusEl = document.getElementById('statusBar');
@@ -340,6 +342,9 @@
         // ============ 初始化 ============
         loadConfig();
         loadLocalHistory();
+        
+        // 清理过期请求（每30秒）
+        setInterval(cleanupPendingRequests, 30000);
         
         // 页面加载后自动连接
         setTimeout(function() {
@@ -385,7 +390,9 @@
                 }
                 autoReconnect = (autoRec === null) ? true : (autoRec === 'true');
                 document.getElementById('autoReconnect').checked = autoReconnect;
-            } catch(e) {}
+            } catch(e) {
+                console.error('[loadConfig]', e);
+            }
         }
         
         function saveConfig() {
@@ -410,6 +417,7 @@
                 
                 setStatus('ok', '配置已保存');
             } catch(e) {
+                console.error('[saveConfig]', e);
                 setStatus('error', '保存失败: ' + e.message);
             }
         }
@@ -421,6 +429,63 @@
         
         function updateConnectionStatus(status) {
             connectionStatusEl.className = 'connection-status ' + status;
+        }
+        
+        // ============ 工具函数 ============
+        function safeSend(data) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                console.error('[safeSend] WebSocket not ready');
+                return false;
+            }
+            try {
+                ws.send(typeof data === 'string' ? data : JSON.stringify(data));
+                return true;
+            } catch(e) {
+                console.error('[safeSend]', e);
+                return false;
+            }
+        }
+        
+        function cleanupPendingRequests() {
+            var now = Date.now();
+            var timeout = 60000; // 1分钟超时
+            var cleaned = 0;
+            
+            for (var id in pendingRequests) {
+                if (pendingRequests.hasOwnProperty(id)) {
+                    if (now - pendingRequests[id].timestamp > timeout) {
+                        delete pendingRequests[id];
+                        cleaned++;
+                    }
+                }
+            }
+            
+            if (cleaned > 0) {
+                console.log('[cleanup] removed', cleaned, 'pending requests');
+            }
+        }
+        
+        function resetStreamingState() {
+            isSending = false;
+            sendBtn.disabled = false;
+            currentRunId = null;
+            if (streamingTimeout) {
+                clearTimeout(streamingTimeout);
+                streamingTimeout = null;
+            }
+            finishStreaming();
+        }
+        
+        function startStreamingTimeout() {
+            if (streamingTimeout) {
+                clearTimeout(streamingTimeout);
+            }
+            streamingTimeout = setTimeout(function() {
+                console.log('[streaming timeout]');
+                resetStreamingState();
+                setStatus('error', '响应超时');
+                addSystemMsg('⚠️ 响应超时，请重试', true);
+            }, maxStreamingTime);
         }
         
         // ============ WebSocket 连接 ============
@@ -458,7 +523,7 @@
                         var data = JSON.parse(event.data);
                         handleMessage(data);
                     } catch(e) {
-                        console.error('Failed to parse message:', e);
+                        console.error('[parse message]', e, event.data);
                     }
                 };
                 
@@ -472,9 +537,9 @@
                     isConnected = false;
                     updateConnectionStatus('disconnected');
                     
+                    // 重置发送状态
                     if (isSending) {
-                        isSending = false;
-                        sendBtn.disabled = false;
+                        resetStreamingState();
                         addSystemMsg('⚠️ 连接已断开，请重试', true);
                     }
                     
@@ -491,6 +556,7 @@
                 };
                 
             } catch(e) {
+                console.error('[connect]', e);
                 setStatus('error', '连接失败: ' + e.message);
                 updateConnectionStatus('disconnected');
             }
@@ -526,11 +592,20 @@
             };
             
             console.log('[connect]', JSON.stringify(req));
-            ws.send(JSON.stringify(req));
+            
+            if (!safeSend(req)) {
+                setStatus('error', '发送握手请求失败');
+                delete pendingRequests[req.id];
+            }
         }
         
         // ============ 消息处理 ============
         function handleMessage(data) {
+            if (!data || typeof data !== 'object') {
+                console.error('[handleMessage] invalid data');
+                return;
+            }
+            
             // 响应
             if (data.type === 'res') {
                 handleResponse(data);
@@ -558,7 +633,10 @@
                     // 连接成功后加载历史
                     loadHistory();
                 } else {
-                    var errMsg = data.error ? (data.error.message || JSON.stringify(data.error)) : '连接失败';
+                    var errMsg = '连接失败';
+                    if (data.error) {
+                        errMsg = data.error.message || JSON.stringify(data.error);
+                    }
                     setStatus('error', '握手失败: ' + errMsg);
                     addSystemMsg('❌ 握手失败: ' + errMsg, false);
                 }
@@ -568,22 +646,24 @@
                 if (data.ok) {
                     currentRunId = data.payload ? data.payload.runId : null;
                     setStatus('loading', '等待回复...');
+                    startStreamingTimeout();
                 } else {
-                    isSending = false;
-                    sendBtn.disabled = false;
-                    var errMsg = data.error ? (data.error.message || JSON.stringify(data.error)) : '发送失败';
+                    resetStreamingState();
+                    var errMsg = '发送失败';
+                    if (data.error) {
+                        errMsg = data.error.message || JSON.stringify(data.error);
+                    }
                     setStatus('error', errMsg);
                     // 发送失败时，仍然显示用户消息
                     if (pending.userText) {
                         addMessage('user', pending.userText);
                     }
-                    addSystemMsg('❌ 发送失败: ' + errMsg, true);
+                    addSystemMsg('❌ ' + errMsg, true);
                 }
             }
             // chat.history 响应
             else if (pending.type === 'chat.history') {
                 if (data.ok && data.payload && data.payload.messages) {
-                    // 合并历史
                     mergeHistory(data.payload.messages);
                     setStatus('ok', '已连接');
                 } else {
@@ -600,35 +680,40 @@
         }
         
         function handleChatEvent(payload) {
-            if (!payload) return;
+            if (!payload) {
+                console.log('[chat event] empty payload');
+                return;
+            }
             
             // 调试日志
             console.log('[chat event]', JSON.stringify(payload).substring(0, 500));
             
-            // 检查 runId 是否匹配（宽松检查：如果没有 runId 就不过滤）
+            // 检查 runId 是否匹配
             if (currentRunId && payload.runId && payload.runId !== currentRunId) {
                 console.log('[runId mismatch] current:', currentRunId, 'event:', payload.runId);
-                return;  // 忽略不匹配的 runId
+                return;
             }
             
             var delta = payload.delta || {};
+            var message = payload.message || {};
             
             // 用户消息（来自 chat 事件）
-            if (delta.role === 'user' && delta.text) {
-                // 检查是否已经显示过这条消息（避免重复）
-                var lastMsg = messages[messages.length - 1];
-                if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== delta.text) {
-                    addMessage('user', delta.text);
+            if (message.role === 'user') {
+                var userText = extractTextContent(message.content);
+                if (userText) {
+                    var lastMsg = messages[messages.length - 1];
+                    if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== userText) {
+                        addMessage('user', userText);
+                    }
                 }
             }
             
-            // 助手文本增量
-            if (delta.role === 'assistant' || !delta.role) {
-                if (delta.text) {
-                    // 找到最后一条 assistant 消息或创建新的
+            // 助手消息增量
+            if (message.role === 'assistant') {
+                var text = extractTextContent(message.content);
+                if (text) {
                     var lastMsg = messages[messages.length - 1];
                     if (!lastMsg || lastMsg.role !== 'assistant' || lastMsg.runId !== payload.runId) {
-                        // 创建新的 assistant 消息
                         lastMsg = {
                             role: 'assistant',
                             content: '',
@@ -638,37 +723,35 @@
                         renderMessage('assistant', '', true);
                     }
                     
-                    lastMsg.content += delta.text;
-                    updateLastMessage(lastMsg.content);
+                    lastMsg.content = text;  // 全量替换（不是追加）
+                    updateLastMessage(text);
                 }
             }
             
-            // 完成 - 尝试多种检测方式
-            var isDone = payload.done || delta.done || payload.state === 'done' || delta.state === 'done';
+            // 完成 - 检测多种标志
+            var isDone = payload.done === true || 
+                         message.done === true ||
+                         payload.state === 'done' || 
+                         message.state === 'done';
+            
             if (isDone) {
                 console.log('[chat done]');
-                finishStreaming();
+                resetStreamingState();
                 saveLocalHistory();
-                isSending = false;
-                sendBtn.disabled = false;
-                currentRunId = null;
                 setStatus('ok', '已连接');
                 
-                // 清理最后一条消息的 runId（不需要持久化）
+                // 清理最后一条消息的 runId
                 var lastMsg = messages[messages.length - 1];
                 if (lastMsg) {
                     delete lastMsg.runId;
                 }
             }
             
-            // 错误
-            if (payload.error || delta.error) {
-                var err = payload.error || delta.error;
+            // 错误处理
+            var err = payload.error || message.error;
+            if (err) {
                 console.log('[chat error]', err);
-                finishStreaming();
-                isSending = false;
-                sendBtn.disabled = false;
-                currentRunId = null;
+                resetStreamingState();
                 setStatus('error', err.message || '错误');
                 addSystemMsg('❌ ' + (err.message || '发生错误'), true);
             }
@@ -676,19 +759,28 @@
         
         // ============ 生成 UUID ============
         function generateUUID() {
-            // 简单的 UUID v4 实现（兼容旧浏览器）
+            try {
+                // 优先使用原生 API
+                if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                    return crypto.randomUUID();
+                }
+            } catch(e) {}
+            
+            // 回退实现
             var d = Date.now();
-            var uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
                 var r = (d + Math.random() * 16) % 16 | 0;
                 d = Math.floor(d / 16);
                 return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
             });
-            return uuid;
         }
         
         // ============ 发送消息 ============
         function sendMessage() {
-            if (isSending) return;
+            if (isSending) {
+                addSystemMsg('⚠️ 请等待当前回复完成', false);
+                return;
+            }
             if (!isConnected) {
                 addSystemMsg('⚠️ 未连接，请先连接到 Gateway', false);
                 return;
@@ -697,8 +789,7 @@
             var text = inputEl.value.trim();
             if (!text) return;
             
-            // 清空输入，但不预先显示用户消息
-            // 用户消息将由 chat 事件触发显示（确保进入 session 系统）
+            // 清空输入
             inputEl.value = '';
             
             // 发送到 Gateway
@@ -720,7 +811,7 @@
             pendingRequests[req.id] = {
                 type: 'chat.send',
                 timestamp: Date.now(),
-                userText: text  // 保存用户消息以便失败时显示
+                userText: text
             };
             
             isSending = true;
@@ -729,13 +820,11 @@
             
             console.log('[chat.send]', JSON.stringify(req));
             
-            try {
-                ws.send(JSON.stringify(req));
-            } catch(e) {
-                isSending = false;
-                sendBtn.disabled = false;
-                setStatus('error', '发送失败: ' + e.message);
-                addSystemMsg('❌ 发送失败: ' + e.message, true);
+            if (!safeSend(req)) {
+                resetStreamingState();
+                setStatus('error', '发送失败');
+                addSystemMsg('❌ 发送失败，WebSocket 未连接', true);
+                delete pendingRequests[req.id];
             }
         }
         
@@ -755,18 +844,16 @@
                 timestamp: Date.now()
             };
             
-            try {
-                ws.send(JSON.stringify(req));
-            } catch(e) {
-                console.error('Failed to load history:', e);
+            if (!safeSend(req)) {
+                console.error('[loadHistory] failed to send request');
+                delete pendingRequests[req.id];
             }
         }
         
         function mergeHistory(serverMessages) {
-            if (!serverMessages || serverMessages.length === 0) return;
+            if (!serverMessages || !serverMessages.length) return;
             
             // 简单合并：如果本地没有历史，直接使用服务端历史
-            // 否则保留本地历史（避免重复）
             if (messages.length === 0) {
                 for (var i = 0; i < serverMessages.length; i++) {
                     var msg = serverMessages[i];
@@ -784,25 +871,28 @@
         }
         
         function extractTextContent(content) {
+            if (!content) return '';
+            
             if (typeof content === 'string') {
                 return content;
             }
-            if (content && content.length) {
+            
+            if (Array.isArray(content)) {
                 var text = '';
                 for (var i = 0; i < content.length; i++) {
                     var block = content[i];
-                    if (block.type === 'text' && block.text) {
+                    if (block && block.type === 'text' && block.text) {
                         text += block.text;
                     }
                 }
                 return text;
             }
+            
             return '';
         }
         
         // ============ 从服务端加载历史（通过 HTTP API）============
         function loadHistoryFromServer() {
-            // 使用 HTTP API /tools/invoke 获取历史
             var httpUrl = wsUrl.replace(/^ws/, 'http');
             var apiUrl = httpUrl + '/tools/invoke';
             
@@ -825,20 +915,25 @@
             }
             
             xhr.onreadystatechange = function() {
-                if (xhr.readyState === 4) {
-                    if (xhr.status === 200) {
-                        try {
-                            var resp = JSON.parse(xhr.responseText);
-                            var serverMsgs = null;
-                            
-                            if (resp.result && resp.result.messages) {
-                                serverMsgs = resp.result.messages;
-                            } else if (resp.messages) {
-                                serverMsgs = resp.messages;
-                            } else if (resp.result && resp.result.content) {
-                                for (var k = 0; k < resp.result.content.length; k++) {
-                                    var block = resp.result.content[k];
-                                    if (block.type === 'text' && block.text) {
+                if (xhr.readyState !== 4) return;
+                
+                if (xhr.status === 200) {
+                    try {
+                        var resp = JSON.parse(xhr.responseText);
+                        var serverMsgs = null;
+                        
+                        // 尝试多种格式
+                        if (resp.result && resp.result.messages) {
+                            serverMsgs = resp.result.messages;
+                        } else if (resp.messages) {
+                            serverMsgs = resp.messages;
+                        } else if (resp.result && resp.result.content) {
+                            // 嵌套 JSON 格式
+                            var content = resp.result.content;
+                            if (Array.isArray(content)) {
+                                for (var k = 0; k < content.length; k++) {
+                                    var block = content[k];
+                                    if (block && block.type === 'text' && block.text) {
                                         try {
                                             var innerData = JSON.parse(block.text);
                                             if (innerData.messages) {
@@ -849,31 +944,39 @@
                                     }
                                 }
                             }
-                            
-                            if (serverMsgs) {
-                                messages = [];
-                                for (var i = 0; i < serverMsgs.length; i++) {
-                                    var msg = serverMsgs[i];
-                                    var content = extractTextContent(msg.content);
-                                    if (content && content.trim()) {
-                                        messages.push({
-                                            role: msg.role,
-                                            content: content.trim()
-                                        });
-                                    }
-                                }
-                                renderAllMessages();
-                                saveLocalHistory();
-                                setStatus(isConnected ? 'ok' : 'error', '已加载 ' + messages.length + ' 条消息');
-                            } else {
-                                setStatus(isConnected ? 'ok' : 'error', '加载失败: 无法解析响应');
-                            }
-                        } catch(e) {
-                            setStatus(isConnected ? 'ok' : 'error', '解析失败: ' + e.message);
                         }
-                    } else {
-                        setStatus(isConnected ? 'ok' : 'error', 'HTTP ' + xhr.status);
+                        
+                        if (serverMsgs) {
+                            messages = [];
+                            for (var i = 0; i < serverMsgs.length; i++) {
+                                var msg = serverMsgs[i];
+                                var content = extractTextContent(msg.content);
+                                if (content && content.trim()) {
+                                    messages.push({
+                                        role: msg.role,
+                                        content: content.trim()
+                                    });
+                                }
+                            }
+                            renderAllMessages();
+                            saveLocalHistory();
+                            setStatus(isConnected ? 'ok' : 'error', '已加载 ' + messages.length + ' 条消息');
+                        } else {
+                            setStatus(isConnected ? 'ok' : 'error', '加载失败: 无法解析响应');
+                        }
+                    } catch(e) {
+                        console.error('[loadHistoryFromServer parse]', e);
+                        setStatus(isConnected ? 'ok' : 'error', '解析失败: ' + e.message);
                     }
+                } else {
+                    var errText = 'HTTP ' + xhr.status;
+                    if (xhr.responseText) {
+                        try {
+                            var errResp = JSON.parse(xhr.responseText);
+                            if (errResp.error) errText = errResp.error.message || errText;
+                        } catch(e) {}
+                    }
+                    setStatus(isConnected ? 'ok' : 'error', errText);
                 }
             };
             
@@ -881,11 +984,16 @@
                 setStatus(isConnected ? 'ok' : 'error', '网络错误');
             };
             
+            xhr.ontimeout = function() {
+                setStatus(isConnected ? 'ok' : 'error', '请求超时');
+            };
+            
             xhr.timeout = 30000;
             
             try {
                 xhr.send(JSON.stringify(body));
             } catch(e) {
+                console.error('[loadHistoryFromServer]', e);
                 setStatus(isConnected ? 'ok' : 'error', '请求失败: ' + e.message);
             }
         }
@@ -949,8 +1057,6 @@
             
             var contentDiv = document.createElement('div');
             contentDiv.className = 'msg-content';
-            
-            // 使用 innerHTML 渲染 Markdown
             contentDiv.innerHTML = renderMarkdown(content);
             
             // 流式时添加光标
@@ -972,7 +1078,6 @@
         }
         
         function updateLastMessage(content) {
-            // 更新最后一条 AI 消息
             var lastMsg = messagesEl.lastElementChild;
             if (lastMsg && lastMsg.classList.contains('msg-assistant')) {
                 var contentDiv = lastMsg.querySelector('.msg-content');
@@ -990,7 +1095,9 @@
         
         function finishStreaming() {
             var cursor = document.getElementById('streamingCursor');
-            if (cursor) cursor.remove();
+            if (cursor && cursor.parentNode) {
+                cursor.remove();
+            }
         }
         
         function renderAllMessages() {
@@ -1003,7 +1110,9 @@
         function saveLocalHistory() {
             try {
                 localStorage.setItem('oc_messages', JSON.stringify(messages));
-            } catch(e) {}
+            } catch(e) {
+                console.error('[saveLocalHistory]', e);
+            }
         }
         
         function loadLocalHistory() {
@@ -1011,17 +1120,23 @@
                 var saved = localStorage.getItem('oc_messages');
                 if (saved) {
                     messages = JSON.parse(saved);
+                    if (!Array.isArray(messages)) {
+                        messages = [];
+                    }
                     renderAllMessages();
                 }
             } catch(e) {
+                console.error('[loadLocalHistory]', e);
                 messages = [];
             }
         }
         
-        function clearHistory() {
-            var btn = event && event.target ? event.target : document.activeElement;
+        function clearHistory(evt) {
+            var btn = evt && evt.target ? evt.target : document.getElementById('clearBtn');
             
-            if (btn && btn.getAttribute('data-confirm') === '1') {
+            if (!btn) return false;
+            
+            if (btn.getAttribute('data-confirm') === '1') {
                 // 已确认，执行清除
                 messages = [];
                 saveLocalHistory();
@@ -1033,27 +1148,25 @@
             }
             
             // 首次点击，请求确认
-            if (btn) {
-                btn.textContent = '⚠️ 确认清除？再点一次';
-                btn.setAttribute('data-confirm', '1');
-                // 3秒后自动恢复
-                setTimeout(function() {
-                    if (btn.getAttribute('data-confirm') === '1') {
-                        btn.textContent = '清除历史';
-                        btn.removeAttribute('data-confirm');
-                    }
-                }, 3000);
-            }
+            btn.textContent = '⚠️ 确认清除？再点一次';
+            btn.setAttribute('data-confirm', '1');
+            
+            // 3秒后自动恢复
+            setTimeout(function() {
+                if (btn.getAttribute('data-confirm') === '1') {
+                    btn.textContent = '清除历史';
+                    btn.removeAttribute('data-confirm');
+                }
+            }, 3000);
+            
             return false;
         }
         
         function addSystemMsg(text, showRetry) {
             var div = document.createElement('div');
             div.className = 'msg msg-system';
-            div.id = 'lastSystemMsg';
             
             var contentSpan = document.createElement('span');
-            contentSpan.id = 'systemMsgText';
             contentSpan.textContent = text;
             div.appendChild(contentSpan);
             
@@ -1064,9 +1177,7 @@
                 retryBtn.style.cssText = 'margin-left:10px;padding:4px 12px;font-size:14px;';
                 retryBtn.textContent = '🔄 重试';
                 retryBtn.onclick = function() {
-                    // 移除系统消息
                     div.remove();
-                    // 重新连接
                     connectWebSocket();
                 };
                 div.appendChild(retryBtn);
@@ -1077,7 +1188,7 @@
         }
         
         function handleKey(e) {
-            if (e.keyCode === 13 && (e.ctrlKey || e.metaKey)) {
+            if (e && e.keyCode === 13 && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 sendMessage();
             }
