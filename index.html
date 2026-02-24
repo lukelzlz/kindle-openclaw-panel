@@ -6,25 +6,14 @@
     <title>OpenClaw Chat</title>
     <style>
         /*
-         * OpenClaw Kindle 聊天面板
+         * OpenClaw Kindle 聊天面板 - WebSocket 版本
          * 
          * 【使用前配置】
-         * 需要先在 Gateway 配置中启用 Chat Completions API:
-         * 
-         * 在 ~/.openclaw/config 中添加:
-         * gateway: {
-         *   http: {
-         *     endpoints: {
-         *       chatCompletions: { enabled: true }
-         *     }
-         *   }
-         * }
-         * 
-         * 或者运行: openclaw config patch '{\"gateway\":{\"http\":{\"endpoints\":{\"chatCompletions\":{\"enabled\":true}}}}}'
+         * 确保 Gateway WebSocket 服务已启动（默认端口 7860）
          * 
          * 【部署说明】
          * 1. 将此文件放到 HTTP 服务器（或本地直接打开）
-         * 2. 填写 Gateway 地址（HTTP 端口，同 WebSocket 端口）
+         * 2. 填写 Gateway WebSocket 地址（ws://host:port）
          * 3. 如有 Token 认证，填写 Gateway Token
          * 4. 在 Kindle 浏览器中访问
          */
@@ -101,6 +90,7 @@
         .status-ok { background: #fff; }
         .status-error { background: #fdd; }
         .status-loading { background: #ff9; }
+        .status-connecting { background: #dfd; }
         
         /* 消息容器 */
         .messages {
@@ -250,6 +240,20 @@
         
         .btn-outline:active { background: #f0f0f0; }
         
+        /* 连接状态指示器 */
+        .connection-status {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        
+        .connection-status.connected { background: #0a0; }
+        .connection-status.disconnected { background: #a00; }
+        .connection-status.connecting { background: #fa0; }
+        
         /* 隐藏 */
         .hidden { display: none; }
     </style>
@@ -262,34 +266,38 @@
     
     <!-- 配置区域 -->
     <div id="configArea" class="config-form hidden">
-        <label>Gateway HTTP 地址:</label>
-        <input type="text" id="gatewayUrl" value="" placeholder="留空使用本地代理">
-        <div class="hint">留空即可（通过代理访问 Gateway）</div>
+        <label>Gateway WebSocket 地址:</label>
+        <input type="text" id="wsUrl" value="ws://127.0.0.1:7860" placeholder="ws://host:port">
+        <div class="hint">Gateway WebSocket 端口（同 HTTP 端口）</div>
         
         <label>Gateway Token:</label>
         <input type="password" id="gatewayToken" placeholder="留空表示无认证">
         <div class="hint">如有设置 gateway.auth.token 则填写</div>
         
-        <label>Agent ID:</label>
-        <input type="text" id="agentId" value="main" placeholder="main">
-        <div class="hint">OpenClaw agent id，默认 main</div>
+        <label>Session Key:</label>
+        <input type="text" id="sessionKey" value="main" placeholder="main">
+        <div class="hint">OpenClaw session key，默认 main</div>
         
-        <label>同步 Session Key (可选):</label>
-        <input type="text" id="syncSessionKey" placeholder="如 agent:main:main">
-        <div class="hint">填入后可从服务端同步该 session 的历史</div>
+        <label>Agent ID (用于历史同步):</label>
+        <input type="text" id="agentId" value="main" placeholder="main">
+        <div class="hint">OpenClaw agent id，用于 /tools/invoke</div>
         
         <label style="display:flex;align-items:center;margin-top:12px">
-            <input type="checkbox" id="allowFallback" checked style="width:auto;margin-right:8px">
-            <span>允许流式传输回退（Kindle 兼容）</span>
+            <input type="checkbox" id="autoReconnect" checked style="width:auto;margin-right:8px">
+            <span>自动重连</span>
         </label>
-        <div class="hint">不支持流式时自动切换到普通模式</div>
+        <div class="hint">WebSocket 断开时自动尝试重新连接</div>
         
         <button class="btn btn-full" onclick="saveConfig()">保存配置</button>
-        <button class="btn btn-full btn-outline" onclick="syncFromServer()" style="margin-top:8px">从服务端同步历史</button>
+        <button class="btn btn-full btn-outline" onclick="connectWebSocket()" style="margin-top:8px">连接 WebSocket</button>
+        <button class="btn btn-full btn-outline" onclick="loadHistoryFromServer()" style="margin-top:8px">从服务端加载历史</button>
     </div>
     
     <!-- 状态栏 -->
-    <div id="statusBar" class="status-bar status-ok">就绪</div>
+    <div id="statusBar" class="status-bar status-ok">
+        <span id="connectionStatus" class="connection-status disconnected"></span>
+        <span id="statusText">未连接</span>
+    </div>
     
     <!-- 消息区域 -->
     <div id="messages" class="messages"></div>
@@ -303,50 +311,42 @@
 
     <script>
         // ============ 配置 ============
-        var gatewayUrl = '';  // 空则使用当前 origin（通过代理）
+        var wsUrl = 'ws://127.0.0.1:7860';
         var gatewayToken = '';
+        var sessionKey = 'main';
         var agentId = 'main';
-        var allowFallback = true;  // 允许流式传输回退
+        var autoReconnect = true;
         
         // ============ 状态 ============
+        var ws = null;
+        var isConnected = false;
         var isSending = false;
         var messages = [];
-        var lastFailedRequest = null;  // 保存失败请求用于重试
-        var autoRetryCount = 0;  // 自动重试计数
-        var maxAutoRetries = 2;  // 最多自动重试次数（共3次请求）
-        var supportsStreaming = false;  // 浏览器是否支持流式
-        
-        // ============ 工具函数 ============
-        function getGatewayUrl() {
-            if (gatewayUrl && gatewayUrl.trim()) {
-                return gatewayUrl.replace(/\/$/, '');
-            }
-            // 使用当前页面的 origin（代理模式）
-            return window.location.origin;
-        }
+        var requestId = 0;
+        var currentRunId = null;
+        var pendingRequests = {};  // 等待响应的请求
+        var reconnectAttempts = 0;
+        var maxReconnectAttempts = 5;
+        var reconnectDelay = 2000;
         
         // ============ DOM ============
         var statusEl = document.getElementById('statusBar');
+        var statusTextEl = document.getElementById('statusText');
+        var connectionStatusEl = document.getElementById('connectionStatus');
         var messagesEl = document.getElementById('messages');
         var inputEl = document.getElementById('inputText');
         var sendBtn = document.getElementById('sendBtn');
         
         // ============ 初始化 ============
-        // 检测浏览器是否支持流式传输
-        supportsStreaming = (function() {
-            try {
-                return typeof ReadableStream !== 'undefined' && 
-                       typeof fetch === 'function';
-            } catch(e) {
-                return false;
-            }
-        })();
-        
-        // 页面加载时初始化
         loadConfig();
-        loadHistory();
+        loadLocalHistory();
         
-        // ============ 初始化 ============
+        // 页面加载后自动连接
+        setTimeout(function() {
+            connectWebSocket();
+        }, 500);
+        
+        // ============ 配置管理 ============
         function toggleConfig() {
             var area = document.getElementById('configArea');
             var btn = document.getElementById('configToggle');
@@ -361,46 +361,46 @@
         
         function loadConfig() {
             try {
-                var url = localStorage.getItem('oc_gateway_url');
+                var url = localStorage.getItem('oc_ws_url');
                 var token = localStorage.getItem('oc_gateway_token');
+                var sessKey = localStorage.getItem('oc_session_key');
                 var agent = localStorage.getItem('oc_agent_id');
-                var syncKey = localStorage.getItem('oc_sync_session_key');
-                var fallback = localStorage.getItem('oc_allow_fallback');
+                var autoRec = localStorage.getItem('oc_auto_reconnect');
                 
                 if (url) {
-                    gatewayUrl = url;
-                    document.getElementById('gatewayUrl').value = url;
+                    wsUrl = url;
+                    document.getElementById('wsUrl').value = url;
                 }
                 if (token) {
                     gatewayToken = token;
                     document.getElementById('gatewayToken').value = token;
                 }
+                if (sessKey) {
+                    sessionKey = sessKey;
+                    document.getElementById('sessionKey').value = sessKey;
+                }
                 if (agent) {
                     agentId = agent;
                     document.getElementById('agentId').value = agent;
                 }
-                if (syncKey) {
-                    document.getElementById('syncSessionKey').value = syncKey;
-                }
-                // 默认允许回退
-                allowFallback = (fallback === null) ? true : (fallback === 'true');
-                document.getElementById('allowFallback').checked = allowFallback;
+                autoReconnect = (autoRec === null) ? true : (autoRec === 'true');
+                document.getElementById('autoReconnect').checked = autoReconnect;
             } catch(e) {}
         }
         
         function saveConfig() {
             try {
-                gatewayUrl = document.getElementById('gatewayUrl').value.trim();  // 可以为空
+                wsUrl = document.getElementById('wsUrl').value.trim() || 'ws://127.0.0.1:7860';
                 gatewayToken = document.getElementById('gatewayToken').value.trim();
+                sessionKey = document.getElementById('sessionKey').value.trim() || 'main';
                 agentId = document.getElementById('agentId').value.trim() || 'main';
-                var syncKey = document.getElementById('syncSessionKey').value.trim();
-                allowFallback = document.getElementById('allowFallback').checked;
+                autoReconnect = document.getElementById('autoReconnect').checked;
                 
-                localStorage.setItem('oc_gateway_url', gatewayUrl);
+                localStorage.setItem('oc_ws_url', wsUrl);
                 localStorage.setItem('oc_gateway_token', gatewayToken);
+                localStorage.setItem('oc_session_key', sessionKey);
                 localStorage.setItem('oc_agent_id', agentId);
-                localStorage.setItem('oc_sync_session_key', syncKey);
-                localStorage.setItem('oc_allow_fallback', allowFallback.toString());
+                localStorage.setItem('oc_auto_reconnect', autoReconnect.toString());
                 
                 // 保存后自动收起配置
                 var area = document.getElementById('configArea');
@@ -415,8 +415,476 @@
         }
         
         function setStatus(type, text) {
-            statusEl.textContent = text;
+            statusTextEl.textContent = text;
             statusEl.className = 'status-bar status-' + type;
+        }
+        
+        function updateConnectionStatus(status) {
+            connectionStatusEl.className = 'connection-status ' + status;
+        }
+        
+        // ============ WebSocket 连接 ============
+        function connectWebSocket() {
+            if (ws) {
+                try { ws.close(); } catch(e) {}
+                ws = null;
+            }
+            
+            isConnected = false;
+            updateConnectionStatus('connecting');
+            setStatus('connecting', '正在连接...');
+            
+            try {
+                // 检查浏览器是否支持 WebSocket
+                if (typeof WebSocket === 'undefined') {
+                    setStatus('error', '浏览器不支持 WebSocket');
+                    addSystemMsg('❌ 浏览器不支持 WebSocket，请使用支持 WebSocket 的浏览器', false);
+                    return;
+                }
+                
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = function() {
+                    console.log('WebSocket connected');
+                    updateConnectionStatus('connecting');
+                    setStatus('connecting', '正在握手...');
+                    
+                    // 发送 connect 请求
+                    sendConnectRequest();
+                };
+                
+                ws.onmessage = function(event) {
+                    try {
+                        var data = JSON.parse(event.data);
+                        handleMessage(data);
+                    } catch(e) {
+                        console.error('Failed to parse message:', e);
+                    }
+                };
+                
+                ws.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                    setStatus('error', 'WebSocket 错误');
+                };
+                
+                ws.onclose = function(event) {
+                    console.log('WebSocket closed:', event.code, event.reason);
+                    isConnected = false;
+                    updateConnectionStatus('disconnected');
+                    
+                    if (isSending) {
+                        isSending = false;
+                        sendBtn.disabled = false;
+                        addSystemMsg('⚠️ 连接已断开，请重试', true);
+                    }
+                    
+                    setStatus('error', '连接已断开');
+                    
+                    // 自动重连
+                    if (autoReconnect && reconnectAttempts < maxReconnectAttempts) {
+                        reconnectAttempts++;
+                        setStatus('connecting', '重连中 (' + reconnectAttempts + '/' + maxReconnectAttempts + ')...');
+                        setTimeout(function() {
+                            connectWebSocket();
+                        }, reconnectDelay);
+                    }
+                };
+                
+            } catch(e) {
+                setStatus('error', '连接失败: ' + e.message);
+                updateConnectionStatus('disconnected');
+            }
+        }
+        
+        function sendConnectRequest() {
+            var req = {
+                type: 'req',
+                id: 'connect-' + (++requestId),
+                method: 'connect',
+                params: {
+                    minProtocol: 3,
+                    maxProtocol: 3,
+                    client: {
+                        id: 'kindle-panel',
+                        displayName: 'Kindle Panel',
+                        version: '1.0.0',
+                        platform: 'kindle',
+                        mode: 'ui'
+                    }
+                }
+            };
+            
+            if (gatewayToken) {
+                req.params.token = gatewayToken;
+            }
+            
+            pendingRequests[req.id] = {
+                type: 'connect',
+                timestamp: Date.now()
+            };
+            
+            ws.send(JSON.stringify(req));
+        }
+        
+        // ============ 消息处理 ============
+        function handleMessage(data) {
+            // 响应
+            if (data.type === 'res') {
+                handleResponse(data);
+            }
+            // 事件
+            else if (data.type === 'event') {
+                handleEvent(data);
+            }
+        }
+        
+        function handleResponse(data) {
+            var pending = pendingRequests[data.id];
+            if (!pending) return;
+            
+            delete pendingRequests[data.id];
+            
+            // connect 响应
+            if (pending.type === 'connect') {
+                if (data.ok) {
+                    isConnected = true;
+                    reconnectAttempts = 0;
+                    updateConnectionStatus('connected');
+                    setStatus('ok', '已连接');
+                    
+                    // 连接成功后加载历史
+                    loadHistory();
+                } else {
+                    var errMsg = data.error ? (data.error.message || JSON.stringify(data.error)) : '连接失败';
+                    setStatus('error', '握手失败: ' + errMsg);
+                    addSystemMsg('❌ 握手失败: ' + errMsg, false);
+                }
+            }
+            // chat.send 响应
+            else if (pending.type === 'chat.send') {
+                if (data.ok) {
+                    currentRunId = data.payload ? data.payload.runId : null;
+                    setStatus('loading', '等待回复...');
+                } else {
+                    isSending = false;
+                    sendBtn.disabled = false;
+                    var errMsg = data.error ? (data.error.message || JSON.stringify(data.error)) : '发送失败';
+                    setStatus('error', errMsg);
+                    // 发送失败时，仍然显示用户消息
+                    if (pending.userText) {
+                        addMessage('user', pending.userText);
+                    }
+                    addSystemMsg('❌ 发送失败: ' + errMsg, true);
+                }
+            }
+            // chat.history 响应
+            else if (pending.type === 'chat.history') {
+                if (data.ok && data.payload && data.payload.messages) {
+                    // 合并历史
+                    mergeHistory(data.payload.messages);
+                    setStatus('ok', '已连接');
+                } else {
+                    setStatus('ok', '已连接（无历史）');
+                }
+            }
+        }
+        
+        function handleEvent(data) {
+            // chat 事件
+            if (data.event === 'chat') {
+                handleChatEvent(data.payload);
+            }
+        }
+        
+        function handleChatEvent(payload) {
+            if (!payload) return;
+            
+            // 调试日志
+            console.log('[chat event]', JSON.stringify(payload).substring(0, 500));
+            
+            // 检查 runId 是否匹配（宽松检查：如果没有 runId 就不过滤）
+            if (currentRunId && payload.runId && payload.runId !== currentRunId) {
+                console.log('[runId mismatch] current:', currentRunId, 'event:', payload.runId);
+                return;  // 忽略不匹配的 runId
+            }
+            
+            var delta = payload.delta || {};
+            
+            // 用户消息（来自 chat 事件）
+            if (delta.role === 'user' && delta.text) {
+                // 检查是否已经显示过这条消息（避免重复）
+                var lastMsg = messages[messages.length - 1];
+                if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== delta.text) {
+                    addMessage('user', delta.text);
+                }
+            }
+            
+            // 助手文本增量
+            if (delta.role === 'assistant' || !delta.role) {
+                if (delta.text) {
+                    // 找到最后一条 assistant 消息或创建新的
+                    var lastMsg = messages[messages.length - 1];
+                    if (!lastMsg || lastMsg.role !== 'assistant' || lastMsg.runId !== payload.runId) {
+                        // 创建新的 assistant 消息
+                        lastMsg = {
+                            role: 'assistant',
+                            content: '',
+                            runId: payload.runId
+                        };
+                        messages.push(lastMsg);
+                        renderMessage('assistant', '', true);
+                    }
+                    
+                    lastMsg.content += delta.text;
+                    updateLastMessage(lastMsg.content);
+                }
+            }
+            
+            // 完成 - 尝试多种检测方式
+            var isDone = payload.done || delta.done || payload.state === 'done' || delta.state === 'done';
+            if (isDone) {
+                console.log('[chat done]');
+                finishStreaming();
+                saveLocalHistory();
+                isSending = false;
+                sendBtn.disabled = false;
+                currentRunId = null;
+                setStatus('ok', '已连接');
+                
+                // 清理最后一条消息的 runId（不需要持久化）
+                var lastMsg = messages[messages.length - 1];
+                if (lastMsg) {
+                    delete lastMsg.runId;
+                }
+            }
+            
+            // 错误
+            if (payload.error || delta.error) {
+                var err = payload.error || delta.error;
+                console.log('[chat error]', err);
+                finishStreaming();
+                isSending = false;
+                sendBtn.disabled = false;
+                currentRunId = null;
+                setStatus('error', err.message || '错误');
+                addSystemMsg('❌ ' + (err.message || '发生错误'), true);
+            }
+        }
+        
+        // ============ 生成 UUID ============
+        function generateUUID() {
+            // 简单的 UUID v4 实现（兼容旧浏览器）
+            var d = Date.now();
+            var uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = (d + Math.random() * 16) % 16 | 0;
+                d = Math.floor(d / 16);
+                return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            });
+            return uuid;
+        }
+        
+        // ============ 发送消息 ============
+        function sendMessage() {
+            if (isSending) return;
+            if (!isConnected) {
+                addSystemMsg('⚠️ 未连接，请先连接到 Gateway', false);
+                return;
+            }
+            
+            var text = inputEl.value.trim();
+            if (!text) return;
+            
+            // 清空输入，但不预先显示用户消息
+            // 用户消息将由 chat 事件触发显示（确保进入 session 系统）
+            inputEl.value = '';
+            
+            // 发送到 Gateway
+            sendChatMessage(text);
+        }
+        
+        function sendChatMessage(text) {
+            var req = {
+                type: 'req',
+                id: 'req-' + (++requestId),
+                method: 'chat.send',
+                params: {
+                    sessionKey: sessionKey,
+                    text: text,
+                    idempotencyKey: generateUUID()
+                }
+            };
+            
+            pendingRequests[req.id] = {
+                type: 'chat.send',
+                timestamp: Date.now(),
+                userText: text  // 保存用户消息以便失败时显示
+            };
+            
+            isSending = true;
+            sendBtn.disabled = true;
+            setStatus('loading', '发送中...');
+            
+            console.log('[chat.send]', JSON.stringify(req));
+            
+            try {
+                ws.send(JSON.stringify(req));
+            } catch(e) {
+                isSending = false;
+                sendBtn.disabled = false;
+                setStatus('error', '发送失败: ' + e.message);
+                addSystemMsg('❌ 发送失败: ' + e.message, true);
+            }
+        }
+        
+        // ============ 加载历史 ============
+        function loadHistory() {
+            var req = {
+                type: 'req',
+                id: 'history-' + (++requestId),
+                method: 'chat.history',
+                params: {
+                    sessionKey: sessionKey
+                }
+            };
+            
+            pendingRequests[req.id] = {
+                type: 'chat.history',
+                timestamp: Date.now()
+            };
+            
+            try {
+                ws.send(JSON.stringify(req));
+            } catch(e) {
+                console.error('Failed to load history:', e);
+            }
+        }
+        
+        function mergeHistory(serverMessages) {
+            if (!serverMessages || serverMessages.length === 0) return;
+            
+            // 简单合并：如果本地没有历史，直接使用服务端历史
+            // 否则保留本地历史（避免重复）
+            if (messages.length === 0) {
+                for (var i = 0; i < serverMessages.length; i++) {
+                    var msg = serverMessages[i];
+                    var content = extractTextContent(msg.content);
+                    if (content) {
+                        messages.push({
+                            role: msg.role,
+                            content: content
+                        });
+                    }
+                }
+                renderAllMessages();
+                saveLocalHistory();
+            }
+        }
+        
+        function extractTextContent(content) {
+            if (typeof content === 'string') {
+                return content;
+            }
+            if (content && content.length) {
+                var text = '';
+                for (var i = 0; i < content.length; i++) {
+                    var block = content[i];
+                    if (block.type === 'text' && block.text) {
+                        text += block.text;
+                    }
+                }
+                return text;
+            }
+            return '';
+        }
+        
+        // ============ 从服务端加载历史（通过 HTTP API）============
+        function loadHistoryFromServer() {
+            // 使用 HTTP API /tools/invoke 获取历史
+            var httpUrl = wsUrl.replace(/^ws/, 'http');
+            var apiUrl = httpUrl + '/tools/invoke';
+            
+            setStatus('loading', '正在加载历史...');
+            
+            var body = {
+                tool: 'sessions_history',
+                args: {
+                    sessionKey: 'agent:' + agentId + ':' + sessionKey,
+                    limit: 100
+                }
+            };
+            
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', apiUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            
+            if (gatewayToken) {
+                xhr.setRequestHeader('Authorization', 'Bearer ' + gatewayToken);
+            }
+            
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            var resp = JSON.parse(xhr.responseText);
+                            var serverMsgs = null;
+                            
+                            if (resp.result && resp.result.messages) {
+                                serverMsgs = resp.result.messages;
+                            } else if (resp.messages) {
+                                serverMsgs = resp.messages;
+                            } else if (resp.result && resp.result.content) {
+                                for (var k = 0; k < resp.result.content.length; k++) {
+                                    var block = resp.result.content[k];
+                                    if (block.type === 'text' && block.text) {
+                                        try {
+                                            var innerData = JSON.parse(block.text);
+                                            if (innerData.messages) {
+                                                serverMsgs = innerData.messages;
+                                                break;
+                                            }
+                                        } catch(parseErr) {}
+                                    }
+                                }
+                            }
+                            
+                            if (serverMsgs) {
+                                messages = [];
+                                for (var i = 0; i < serverMsgs.length; i++) {
+                                    var msg = serverMsgs[i];
+                                    var content = extractTextContent(msg.content);
+                                    if (content && content.trim()) {
+                                        messages.push({
+                                            role: msg.role,
+                                            content: content.trim()
+                                        });
+                                    }
+                                }
+                                renderAllMessages();
+                                saveLocalHistory();
+                                setStatus(isConnected ? 'ok' : 'error', '已加载 ' + messages.length + ' 条消息');
+                            } else {
+                                setStatus(isConnected ? 'ok' : 'error', '加载失败: 无法解析响应');
+                            }
+                        } catch(e) {
+                            setStatus(isConnected ? 'ok' : 'error', '解析失败: ' + e.message);
+                        }
+                    } else {
+                        setStatus(isConnected ? 'ok' : 'error', 'HTTP ' + xhr.status);
+                    }
+                }
+            };
+            
+            xhr.onerror = function() {
+                setStatus(isConnected ? 'ok' : 'error', '网络错误');
+            };
+            
+            xhr.timeout = 30000;
+            
+            try {
+                xhr.send(JSON.stringify(body));
+            } catch(e) {
+                setStatus(isConnected ? 'ok' : 'error', '请求失败: ' + e.message);
+            }
         }
         
         // ============ Markdown 渲染 ============
@@ -462,7 +930,7 @@
         // ============ 消息显示 ============
         function addMessage(role, content) {
             messages.push({role: role, content: content});
-            saveHistory();
+            saveLocalHistory();
             renderMessage(role, content);
         }
         
@@ -529,13 +997,13 @@
             }
         }
         
-        function saveHistory() {
+        function saveLocalHistory() {
             try {
                 localStorage.setItem('oc_messages', JSON.stringify(messages));
             } catch(e) {}
         }
         
-        function loadHistory() {
+        function loadLocalHistory() {
             try {
                 var saved = localStorage.getItem('oc_messages');
                 if (saved) {
@@ -548,17 +1016,16 @@
         }
         
         function clearHistory() {
-            // Kindle 浏览器可能不支持 confirm/alert，使用按钮确认模式
             var btn = event && event.target ? event.target : document.activeElement;
             
             if (btn && btn.getAttribute('data-confirm') === '1') {
                 // 已确认，执行清除
                 messages = [];
-                saveHistory();
+                saveLocalHistory();
                 messagesEl.innerHTML = '';
                 btn.textContent = '清除历史';
                 btn.removeAttribute('data-confirm');
-                setStatus('ok', '已清除聊天记录');
+                setStatus(isConnected ? 'ok' : 'error', '已清除聊天记录');
                 return false;
             }
             
@@ -577,516 +1044,33 @@
             return false;
         }
         
-        // ============ 从服务端同步历史 ============
-        function syncFromServer() {
-            var sessionKey = document.getElementById('syncSessionKey').value.trim();
-            if (!sessionKey) {
-                addSystemMsg('⚠️ 请先填写要同步的 Session Key', false, 0);
-                return;
-            }
-            
-            // 清除之前的系统消息
-            var lastSysMsg = document.getElementById('lastSystemMsg');
-            if (lastSysMsg) lastSysMsg.remove();
-            
-            setStatus('loading', '正在连接服务端...');
-            addSystemMsg('⏳ 正在同步历史消息...', false, 0);
-            
-            var apiUrl = getGatewayUrl() + '/tools/invoke';
-            
-            var body = {
-                tool: 'sessions_history',
-                args: {
-                    sessionKey: sessionKey,
-                    limit: 100
-                }
-            };
-            
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', apiUrl, true);
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            
-            if (gatewayToken) {
-                xhr.setRequestHeader('Authorization', 'Bearer ' + gatewayToken);
-            }
-            
-            xhr.onreadystatechange = function() {
-                if (xhr.readyState === 4) {
-                    if (xhr.status === 200) {
-                        updateSystemMsg('⏳ 正在解析响应...');
-                        try {
-                            var resp = JSON.parse(xhr.responseText);
-                            // 兼容三种格式:
-                            // 1. resp.result.messages (直接)
-                            // 2. resp.messages (简化)
-                            // 3. resp.result.content[0].text (tools/invoke 嵌套 JSON)
-                            var serverMsgs = null;
-                            
-                            if (resp.result && resp.result.messages) {
-                                serverMsgs = resp.result.messages;
-                            } else if (resp.messages) {
-                                serverMsgs = resp.messages;
-                            } else if (resp.result && resp.result.content) {
-                                // tools/invoke 格式: 需要从 content 数组中提取 JSON
-                                for (var k = 0; k < resp.result.content.length; k++) {
-                                    var block = resp.result.content[k];
-                                    if (block.type === 'text' && block.text) {
-                                        try {
-                                            var innerData = JSON.parse(block.text);
-                                            if (innerData.messages) {
-                                                serverMsgs = innerData.messages;
-                                                break;
-                                            }
-                                        } catch(parseErr) {
-                                            // 解析内层 JSON 失败，继续尝试其他格式
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if (resp.ok && serverMsgs) {
-                                messages = [];
-                                
-                                for (var i = 0; i < serverMsgs.length; i++) {
-                                    var msg = serverMsgs[i];
-                                    var role = msg.role;
-                                    var content = '';
-                                    
-                                    // 提取文本内容
-                                    if (typeof msg.content === 'string') {
-                                        content = msg.content;
-                                    } else if (msg.content && msg.content.length) {
-                                        for (var j = 0; j < msg.content.length; j++) {
-                                            var block = msg.content[j];
-                                            if (block.type === 'text' && block.text) {
-                                                content += block.text;
-                                            } else if (block.type === 'toolCall') {
-                                                content += '[调用工具: ' + block.name + ']\n';
-                                            } else if (block.type === 'thinking') {
-                                                // 跳过 thinking 块
-                                            }
-                                        }
-                                    }
-                                    
-                                    if (content && content.trim()) {
-                                        messages.push({role: role, content: content.trim()});
-                                    }
-                                }
-                                
-                                saveHistory();
-                                renderAllMessages();
-                                
-                                // 移除系统消息
-                                var sysMsg = document.getElementById('lastSystemMsg');
-                                if (sysMsg) sysMsg.remove();
-                                
-                                setStatus('ok', '已同步 ' + messages.length + ' 条消息');
-                            } else {
-                                // 显示详细错误信息
-                                var errDetail = '';
-                                if (!resp.ok) errDetail += 'resp.ok=false; ';
-                                if (!serverMsgs) {
-                                    errDetail += '未找到 messages; ';
-                                    // 显示尝试的路径
-                                    if (resp.result) {
-                                        errDetail += 'result keys: ' + Object.keys(resp.result).join(',') + '; ';
-                                    }
-                                }
-                                errDetail += '响应: ' + JSON.stringify(resp).substring(0, 200);
-                                updateSystemMsg('❌ 同步失败: ' + errDetail);
-                                setStatus('error', '同步失败');
-                            }
-                        } catch(e) {
-                            // 解析错误，显示原始响应
-                            var rawPreview = xhr.responseText.substring(0, 300);
-                            updateSystemMsg('❌ 解析失败: ' + e.message + '\n原始响应: ' + rawPreview);
-                            setStatus('error', '解析失败');
-                        }
-                    } else {
-                        // HTTP 错误
-                        var errText = '同步失败 (HTTP ' + xhr.status + ')';
-                        var errDetail = '';
-                        
-                        // 尝试解析错误响应
-                        try {
-                            var errJson = JSON.parse(xhr.responseText);
-                            if (errJson.error) {
-                                if (errJson.error.message) errDetail += errJson.error.message;
-                                if (errJson.error.type) errDetail += ' [' + errJson.error.type + ']';
-                                if (errJson.error.code) errDetail += ' (code: ' + errJson.error.code + ')';
-                            } else {
-                                errDetail = JSON.stringify(errJson).substring(0, 150);
-                            }
-                        } catch(e) {
-                            // 非 JSON 响应
-                            errDetail = xhr.responseText.substring(0, 150) || '(空响应)';
-                        }
-                        
-                        if (errDetail) errText += '\n' + errDetail;
-                        updateSystemMsg('❌ ' + errText);
-                        setStatus('error', 'HTTP ' + xhr.status);
-                    }
-                }
-            };
-            
-            xhr.onerror = function() {
-                updateSystemMsg('❌ 网络错误: 无法连接到服务端\nURL: ' + apiUrl);
-                setStatus('error', '网络错误');
-            };
-            
-            xhr.ontimeout = function() {
-                updateSystemMsg('❌ 请求超时');
-                setStatus('error', '请求超时');
-            };
-            
-            xhr.timeout = 30000;  // 30 秒超时
-            
-            try {
-                xhr.send(JSON.stringify(body));
-            } catch(e) {
-                updateSystemMsg('❌ 请求失败: ' + e.message);
-                setStatus('error', '请求失败');
-            }
-        }
-        
-        function addSystemMsg(text, showRetry, httpStatus) {
+        function addSystemMsg(text, showRetry) {
             var div = document.createElement('div');
             div.className = 'msg msg-system';
-            div.id = 'lastSystemMsg';  // 用于更新
+            div.id = 'lastSystemMsg';
             
             var contentSpan = document.createElement('span');
             contentSpan.id = 'systemMsgText';
-            
-            // 如果是 500 错误，显示更友好的提示
-            if (httpStatus && httpStatus >= 500) {
-                contentSpan.innerHTML = '⚠️ 服务器暂时不可用 (' + httpStatus + ')';
-            } else {
-                contentSpan.textContent = text;
-            }
+            contentSpan.textContent = text;
             div.appendChild(contentSpan);
             
             // 添加重试按钮
-            if (showRetry && lastFailedRequest) {
+            if (showRetry) {
                 var retryBtn = document.createElement('button');
                 retryBtn.className = 'btn btn-outline';
-                retryBtn.id = 'retryBtn';
                 retryBtn.style.cssText = 'margin-left:10px;padding:4px 12px;font-size:14px;';
                 retryBtn.textContent = '🔄 重试';
-                retryBtn.onclick = retryLastRequest;
+                retryBtn.onclick = function() {
+                    // 移除系统消息
+                    div.remove();
+                    // 重新连接
+                    connectWebSocket();
+                };
                 div.appendChild(retryBtn);
             }
             
             messagesEl.appendChild(div);
             messagesEl.scrollTop = messagesEl.scrollHeight;
-        }
-        
-        // 更新系统消息（用于重试进度）
-        function updateSystemMsg(text) {
-            var textEl = document.getElementById('systemMsgText');
-            if (textEl) {
-                textEl.textContent = text;
-            }
-        }
-        
-        // 移除重试按钮
-        function removeRetryButton() {
-            var btn = document.getElementById('retryBtn');
-            if (btn) btn.remove();
-        }
-        
-        // ============ 发送消息 ============
-        function sendMessage() {
-            if (isSending) return;
-            
-            var text = inputEl.value.trim();
-            if (!text) return;
-            
-            // 显示用户消息
-            addMessage('user', text);
-            inputEl.value = '';
-            
-            // 发送请求（不传消息文本则使用 lastFailedRequest）
-            sendRequest(messages.slice());
-        }
-        
-        function sendRequest(msgHistory, isRetry) {
-            isRetry = isRetry || false;
-            
-            // 构建请求
-            var apiUrl = getGatewayUrl() + '/v1/chat/completions';
-            
-            // 判断是否使用流式传输
-            // supportsStreaming: 浏览器是否支持
-            // allowFallback: 不支持时是否允许降级
-            if (!supportsStreaming && !allowFallback) {
-                // 不支持流式且不允许回退
-                addSystemMsg('⚠️ 浏览器不支持流式传输，请启用"允许流式传输回退"选项', false, 0);
-                setStatus('error', '不兼容');
-                isSending = false;
-                sendBtn.disabled = false;
-                return;
-            }
-            
-            var useStreaming = supportsStreaming;
-
-            var body = {
-                model: 'openclaw:' + agentId,
-                messages: msgHistory,
-                stream: useStreaming  // 根据浏览器支持和配置决定
-            };
-            
-            // 保存请求用于重试
-            lastFailedRequest = msgHistory.slice();
-            
-            isSending = true;
-            sendBtn.disabled = true;
-            
-            // 清除之前的系统消息
-            var lastSysMsg = document.getElementById('lastSystemMsg');
-            if (lastSysMsg) lastSysMsg.remove();
-            
-            if (isRetry) {
-                setStatus('loading', '重试中... (第 ' + (autoRetryCount + 1) + ' 次)');
-            } else {
-                autoRetryCount = 0;
-                setStatus('loading', '等待回复...');
-            }
-            
-            // 判断使用流式还是普通请求
-            if (useStreaming) {
-                // 使用 fetch 处理流式响应
-                sendStreamingRequest(apiUrl, body);
-            } else {
-                // 使用 XHR 处理普通请求（兼容模式）
-                sendNormalRequest(apiUrl, body);
-            }
-        }
-        
-        // 流式请求
-        function sendStreamingRequest(apiUrl, body) {
-            var headers = {'Content-Type': 'application/json'};
-            if (gatewayToken) {
-                headers['Authorization'] = 'Bearer ' + gatewayToken;
-            }
-            
-            fetch(apiUrl, {
-                method: 'POST',
-                headers: headers,
-                body: JSON.stringify(body)
-            })
-            .then(function(response) {
-                if (!response.ok) {
-                    // 5xx 服务器错误 - 自动重试
-                    if (response.status >= 500 && response.status < 600 && autoRetryCount < maxAutoRetries) {
-                        autoRetryCount++;
-                        updateSystemMsg('⏳ 服务器错误 (' + response.status + ')，自动重试第 ' + autoRetryCount + ' 次...');
-                        setTimeout(function() {
-                            sendRequest(lastFailedRequest, true);
-                        }, 1500);
-                        return null;
-                    }
-                    
-                    // 其他错误或重试次数用尽
-                    var errorMsg = '请求失败';
-                    var errorStatus = response.status;
-                    
-                    if (response.status >= 500) {
-                        errorMsg = '服务器错误';
-                    } else if (response.status === 401 || response.status === 403) {
-                        errorMsg = '认证失败，请检查 Token';
-                    } else if (response.status === 404) {
-                        errorMsg = '接口不存在';
-                    }
-                    
-                    throw {message: errorMsg, status: errorStatus};
-                }
-                
-                // 移除可能存在的系统消息
-                var sysMsg = document.getElementById('lastSystemMsg');
-                if (sysMsg) sysMsg.remove();
-                
-                // 创建一个空的 AI 消息占位
-                renderMessage('assistant', '', true);
-                
-                setStatus('loading', '接收中...');
-                
-                // 返回 reader
-                return response.body.getReader();
-            })
-            .then(function(reader) {
-                if (!reader) return;
-                
-                var decoder = new TextDecoder();
-                var buffer = '';
-                var fullContent = '';
-                
-                function readChunk() {
-                    reader.read().then(function(result) {
-                        if (result.done) {
-                            // 流结束
-                            finishStreaming();
-                            messages.push({role: 'assistant', content: fullContent});
-                            saveHistory();
-                            
-                            isSending = false;
-                            sendBtn.disabled = false;
-                            autoRetryCount = 0;
-                            lastFailedRequest = null;
-                            setStatus('ok', '就绪');
-                            return;
-                        }
-                        
-                        // 解码数据
-                        buffer += decoder.decode(result.value, {stream: true});
-                        
-                        // 按行分割处理 SSE
-                        var lines = buffer.split('\n');
-                        buffer = lines.pop();  // 保留不完整的行
-                        
-                        for (var i = 0; i < lines.length; i++) {
-                            var line = lines[i].trim();
-                            if (!line || line === '') continue;
-                            
-                            // SSE 格式: data: {...}
-                            if (line.startsWith('data: ')) {
-                                var data = line.substring(6);
-                                if (data === '[DONE]') continue;
-                                
-                                try {
-                                    var json = JSON.parse(data);
-                                    var delta = json.choices && json.choices[0] && json.choices[0].delta;
-                                    if (delta && delta.content) {
-                                        fullContent += delta.content;
-                                        updateLastMessage(fullContent);
-                                    }
-                                } catch(e) {
-                                    // 忽略解析错误
-                                }
-                            }
-                        }
-                        
-                        // 继续读取
-                        readChunk();
-                    });
-                }
-                
-                readChunk();
-            })
-            .catch(function(error) {
-                isSending = false;
-                sendBtn.disabled = false;
-                
-                var errText = error.message || error || '请求失败';
-                var httpStatus = error.status || 0;
-                
-                // 如果是 500 错误且重试用尽，显示重试按钮
-                if (httpStatus >= 500 && autoRetryCount >= maxAutoRetries) {
-                    addSystemMsg(errText, true, httpStatus);
-                    setStatus('error', '服务器错误 - 可手动重试');
-                } else {
-                    addSystemMsg(errText, httpStatus === 0, httpStatus);
-                    setStatus('error', errText);
-                }
-            });
-        }
-        
-        // 普通请求（兼容模式）
-        function sendNormalRequest(apiUrl, body) {
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', apiUrl, true);
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            
-            if (gatewayToken) {
-                xhr.setRequestHeader('Authorization', 'Bearer ' + gatewayToken);
-            }
-            
-            xhr.onreadystatechange = function() {
-                if (xhr.readyState === 4) {
-                    isSending = false;
-                    sendBtn.disabled = false;
-                    
-                    if (xhr.status === 200) {
-                        try {
-                            var resp = JSON.parse(xhr.responseText);
-                            var content = '';
-                            
-                            if (resp.choices && resp.choices[0] && resp.choices[0].message) {
-                                content = resp.choices[0].message.content || '';
-                            }
-                            
-                            // 移除可能存在的系统消息
-                            var sysMsg = document.getElementById('lastSystemMsg');
-                            if (sysMsg) sysMsg.remove();
-                            
-                            // 显示 AI 消息
-                            addMessage('assistant', content);
-                            
-                            autoRetryCount = 0;
-                            lastFailedRequest = null;
-                            setStatus('ok', '就绪');
-                        } catch(e) {
-                            addSystemMsg('响应解析失败', false);
-                            setStatus('error', '响应解析失败');
-                        }
-                    } else {
-                        // 错误处理
-                        var errText = '请求失败';
-                        var httpStatus = xhr.status;
-                        
-                        // 5xx 服务器错误 - 自动重试
-                        if (httpStatus >= 500 && httpStatus < 600 && autoRetryCount < maxAutoRetries) {
-                            autoRetryCount++;
-                            addSystemMsg('⏳ 服务器错误 (' + httpStatus + ')，自动重试第 ' + autoRetryCount + ' 次...', false);
-                            setTimeout(function() {
-                                sendRequest(lastFailedRequest, true);
-                            }, 1500);
-                            isSending = true;
-                            sendBtn.disabled = true;
-                            return;
-                        }
-                        
-                        if (httpStatus >= 500) {
-                            errText = '服务器错误';
-                        } else if (httpStatus === 401 || httpStatus === 403) {
-                            errText = '认证失败，请检查 Token';
-                        } else if (httpStatus === 404) {
-                            errText = '接口不存在';
-                        }
-                        
-                        // 如果是 500 错误且重试用尽，显示重试按钮
-                        if (httpStatus >= 500 && autoRetryCount >= maxAutoRetries) {
-                            addSystemMsg(errText, true, httpStatus);
-                            setStatus('error', '服务器错误 - 可手动重试');
-                        } else {
-                            addSystemMsg(errText, httpStatus === 0, httpStatus);
-                            setStatus('error', errText);
-                        }
-                    }
-                }
-            };
-            
-            xhr.onerror = function() {
-                isSending = false;
-                sendBtn.disabled = false;
-                addSystemMsg('网络错误', true);
-                setStatus('error', '网络错误');
-            };
-            
-            try {
-                xhr.send(JSON.stringify(body));
-            } catch(e) {
-                isSending = false;
-                sendBtn.disabled = false;
-                addSystemMsg('请求失败: ' + e.message, false);
-                setStatus('error', '请求失败: ' + e.message);
-            }
-        }
-        
-        // 手动重试
-        function retryLastRequest() {
-            if (!lastFailedRequest || isSending) return;
-            autoRetryCount = 0;
-            sendRequest(lastFailedRequest, true);
         }
         
         function handleKey(e) {
