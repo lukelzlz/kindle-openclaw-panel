@@ -616,12 +616,32 @@
                         updateSystemMsg('⏳ 正在解析响应...');
                         try {
                             var resp = JSON.parse(xhr.responseText);
-                            // 兼容两种格式: resp.result.messages 或 resp.messages
+                            // 兼容三种格式:
+                            // 1. resp.result.messages (直接)
+                            // 2. resp.messages (简化)
+                            // 3. resp.result.content[0].text (tools/invoke 嵌套 JSON)
                             var serverMsgs = null;
+                            
                             if (resp.result && resp.result.messages) {
                                 serverMsgs = resp.result.messages;
                             } else if (resp.messages) {
                                 serverMsgs = resp.messages;
+                            } else if (resp.result && resp.result.content) {
+                                // tools/invoke 格式: 需要从 content 数组中提取 JSON
+                                for (var k = 0; k < resp.result.content.length; k++) {
+                                    var block = resp.result.content[k];
+                                    if (block.type === 'text' && block.text) {
+                                        try {
+                                            var innerData = JSON.parse(block.text);
+                                            if (innerData.messages) {
+                                                serverMsgs = innerData.messages;
+                                                break;
+                                            }
+                                        } catch(parseErr) {
+                                            // 解析内层 JSON 失败，继续尝试其他格式
+                                        }
+                                    }
+                                }
                             }
                             
                             if (resp.ok && serverMsgs) {
@@ -665,7 +685,13 @@
                                 // 显示详细错误信息
                                 var errDetail = '';
                                 if (!resp.ok) errDetail += 'resp.ok=false; ';
-                                if (!serverMsgs) errDetail += '无 messages 字段; ';
+                                if (!serverMsgs) {
+                                    errDetail += '未找到 messages; ';
+                                    // 显示尝试的路径
+                                    if (resp.result) {
+                                        errDetail += 'result keys: ' + Object.keys(resp.result).join(',') + '; ';
+                                    }
+                                }
                                 errDetail += '响应: ' + JSON.stringify(resp).substring(0, 200);
                                 updateSystemMsg('❌ 同步失败: ' + errDetail);
                                 setStatus('error', '同步失败');
